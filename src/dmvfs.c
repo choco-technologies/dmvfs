@@ -289,10 +289,17 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
         return NULL;
     }
 
+    DMOD_LOG_INFO("Looking for filesystem '%s' with signature: '%s'\n", fs_name, dmod_dmfsi_fopen_sig);
     Dmod_Context_t* fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, NULL);
+    if(fs_context == NULL)
+    {
+        DMOD_LOG_INFO("No DIF modules found for signature: '%s'\n", dmod_dmfsi_fopen_sig);
+    }
     while(fs_context != NULL)
     {
-        if(fs_context->Header != NULL && strcmp(fs_context->Header->Name, fs_name) == 0)
+        const char* module_name = Dmod_GetName(fs_context);
+        DMOD_LOG_INFO("Found DIF module: '%s'\n", module_name ? module_name : "(null)");
+        if(module_name != NULL && strcmp(module_name, fs_name) == 0)
         {
             DMOD_LOG_VERBOSE("File system '%s' found\n", fs_name);
             unlock_mutex();

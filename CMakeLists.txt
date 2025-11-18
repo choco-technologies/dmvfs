@@ -22,7 +22,7 @@ if(NOT TARGET dmod_inc)
     FetchContent_Declare(
         dmod
         GIT_REPOSITORY https://github.com/choco-technologies/dmod.git
-        GIT_TAG        develop
+        GIT_TAG        4310394  # Commit before c6030c9 which introduced DMOD_MAKE_VERSION bug in DIF signatures
     )
 
     # ======================================================================
