@@ -255,7 +255,7 @@ static bool close_all_file_of_mount_point(mount_point_t* mp_entry)
             dmod_dmfsi_fclose_t close_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(mp_entry->fs_context, dmod_dmfsi_fclose_sig);
             if(close_func != NULL)
             {
-                if(!close_func(mp_entry->mount_context, g_open_files[i].fs_file))
+                if(close_func(mp_entry->mount_context, g_open_files[i].fs_file) != 0)
                 {
                     DMOD_LOG_ERROR("Failed to close file in mount point '%s'\n", mp_entry->mount_point);
                     return false;
@@ -832,7 +832,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
-    if (!fclose_func(file_entry->mount_point->mount_context, file_entry->fs_file))
+    if (fclose_func(file_entry->mount_point->mount_context, file_entry->fs_file) != 0)
     {
         DMOD_LOG_ERROR("Failed to close file\n");
         file_entry->mount_point = NULL;
@@ -885,7 +885,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
 
             if (fclose_func != NULL)
             {
-                if (!fclose_func(g_open_files[i].mount_point->mount_context, g_open_files[i].fs_file))
+                if (fclose_func(g_open_files[i].mount_point->mount_context, g_open_files[i].fs_file) != 0)
                 {
                     DMOD_LOG_ERROR("Failed to close file for process ID %d\n", pid);
                     success = false;
