@@ -33,6 +33,7 @@ if(NOT TARGET dmod_inc)
     set(DMOD_BUILD_EXAMPLES OFF CACHE BOOL "Build examples")
     set(DMOD_BUILD_TOOLS OFF CACHE BOOL "Build tools")
     set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
+    set(DMOD_EXTERNAL_REGISTRATION ON CACHE BOOL "Use external registration")
     
     # Pass coverage flags to DMOD if enabled
     if(ENABLE_COVERAGE)
