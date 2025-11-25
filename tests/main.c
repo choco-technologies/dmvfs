@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include "dmod.h"
 #include "dmvfs.h"
+#include "dmlist.h"
 
 // Test result tracking
 typedef struct {
@@ -506,6 +507,78 @@ bool test_directory_creation_and_listing(void)
 
 // -----------------------------------------
 //
+//      Test: DMLIST linked list operations
+//
+// -----------------------------------------
+bool test_dmlist_operations(void)
+{
+    TEST_START("DMLIST linked list operations");
+    
+    // Create a list
+    dmlist_context_t* list = dmlist_create("fs_tester");
+    if (list == NULL) {
+        TEST_FAIL("Cannot create dmlist");
+        return false;
+    }
+    
+    // Check if empty
+    if (!dmlist_is_empty(list)) {
+        dmlist_destroy(list);
+        TEST_FAIL("New list should be empty");
+        return false;
+    }
+    
+    // Add some test data
+    int test_values[] = {1, 2, 3};
+    
+    if (!dmlist_push_back(list, &test_values[0])) {
+        dmlist_destroy(list);
+        TEST_FAIL("Cannot push to list");
+        return false;
+    }
+    
+    if (!dmlist_push_back(list, &test_values[1])) {
+        dmlist_destroy(list);
+        TEST_FAIL("Cannot push second element");
+        return false;
+    }
+    
+    if (!dmlist_push_front(list, &test_values[2])) {
+        dmlist_destroy(list);
+        TEST_FAIL("Cannot push front");
+        return false;
+    }
+    
+    // Check size
+    if (dmlist_size(list) != 3) {
+        dmlist_destroy(list);
+        TEST_FAIL("List size should be 3");
+        return false;
+    }
+    
+    // Get front element (should be test_values[2] = 3)
+    int* front = (int*)dmlist_front(list);
+    if (front == NULL || *front != 3) {
+        dmlist_destroy(list);
+        TEST_FAIL("Front element incorrect");
+        return false;
+    }
+    
+    // Clear and destroy
+    dmlist_clear(list);
+    if (!dmlist_is_empty(list)) {
+        dmlist_destroy(list);
+        TEST_FAIL("List should be empty after clear");
+        return false;
+    }
+    
+    dmlist_destroy(list);
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
 //      Run all tests
 //
 // -----------------------------------------
@@ -658,6 +731,9 @@ void run_all_tests(void)
         test_directory_listing();
         test_directory_creation_and_listing();
     }
+    
+    // DMLIST library tests (run in both modes)
+    test_dmlist_operations();
     
     // Print summary
     printf("\n========================================\n");
