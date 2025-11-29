@@ -42,6 +42,9 @@ if(NOT TARGET dmod_inc)
 
     FetchContent_MakeAvailable(dmod)
     set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory" FORCE)
+    # Export DMOD_SCRIPTS_DIR to ensure it's available for external projects
+    # that use create_library_makefile function from dmod
+    set(DMOD_SCRIPTS_DIR ${dmod_SOURCE_DIR}/scripts CACHE PATH "Path to dmod scripts directory" FORCE)
 else()
     message(STATUS "dmod target already exists, skipping FetchContent")
 endif()
