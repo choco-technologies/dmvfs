@@ -288,20 +288,40 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
         DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return NULL;
     }
-
-    Dmod_Context_t* fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, NULL);
-    while(fs_context != NULL)
+    Dmod_Context_t* fs_context = NULL;
+    if(!Dmod_IsModuleLoaded(fs_name))
     {
-        if(fs_context->Header != NULL && strcmp(fs_context->Header->Name, fs_name) == 0)
+        fs_context = Dmod_LoadModuleByName(fs_name);
+        if(Dmod_GetDifFunction(fs_context, dmod_dmfsi_fopen_sig) == NULL)
         {
-            DMOD_LOG_VERBOSE("File system '%s' found\n", fs_name);
-            unlock_mutex();
-            return fs_context;
+            DMOD_LOG_WARN("Module '%s' is not a valid file system\n", fs_name);
+            Dmod_UnloadModule(fs_name, true);
+            fs_context = NULL;
         }
-        fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, fs_context);
     }
-
-    DMOD_LOG_WARN("File system '%s' not found\n", fs_name);
+    else 
+    {
+        Dmod_Context_t* fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, NULL);
+        while(fs_context != NULL)
+        {
+            const char* moduleName = Dmod_GetName(fs_context);
+            if(strcmp(moduleName, fs_name) == 0)
+            {
+                DMOD_LOG_VERBOSE("File system '%s' found\n", fs_name);
+                unlock_mutex();
+                return fs_context;
+            }
+            fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, fs_context);
+        }
+    }
+    if(fs_context)
+    {
+        DMOD_LOG_VERBOSE("File system '%s' found\n", fs_name);
+    }
+    else 
+    {
+        DMOD_LOG_WARN("File system '%s' not found\n", fs_name);
+    }
     unlock_mutex();
     return NULL;
 }
