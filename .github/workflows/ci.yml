@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DDMVFS_BUILD_TESTS=ON .. 
+          cmake -DCMAKE_BUILD_TYPE=Release -DDMVFS_BUILD_TESTS=ON -DDMVFS_INCLUDE_DMOD_SAL=OFF .. 
 
       - name: Build project
         run: |
