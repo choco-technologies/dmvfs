@@ -2325,6 +2325,42 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _getpwd, (char* buffer, size_t size)
 }
 
 /**
+ * @brief Set the current process working directory in DMVFS
+ *
+ * This function sets the current process working directory (PWD) to the specified path.
+ *
+ * @param path Path to set as the process working directory
+ * @return 0 on success, -1 on failure (e.g., DMVFS not initialized or path is NULL)
+ */
+DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _setpwd, (const char* path))
+{
+    if (!is_initialized() || path == NULL)
+    {
+        DMOD_LOG_ERROR("DMVFS is not initialized or path is NULL\n");
+        return -1;
+    }
+
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        return -1;
+    }
+
+    char* new_pwd = update_string(g_pwd, path);
+    if (new_pwd == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to update process working directory\n");
+        unlock_mutex();
+        return -1;
+    }
+
+    g_pwd = new_pwd;
+    DMOD_LOG_INFO("Process working directory set to '%s'\n", g_pwd);
+    unlock_mutex();
+    return 0;
+}
+
+/**
  * @brief Convert a relative path to an absolute path
  * 
  * This function converts a given relative path to an absolute path

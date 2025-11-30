@@ -47,6 +47,7 @@ DMOD_BUILTIN_API( dmvfs, 1.0, int, _direxists, (const char* path) );
 // Current working directory
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _getcwd, (char* buffer, size_t size) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _getpwd, (char* buffer, size_t size) );
+DMOD_BUILTIN_API( dmvfs, 1.0, int, _setpwd, (const char* path) );
 
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _toabs, (const char* path, char* abs_path, size_t size) );
 

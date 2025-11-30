@@ -508,6 +508,59 @@ bool test_directory_creation_and_listing(void)
 
 // -----------------------------------------
 //
+//      Test: PWD (Process Working Directory) operations
+//
+// -----------------------------------------
+bool test_pwd_operations(void)
+{
+    TEST_START("PWD operations (getpwd/setpwd)");
+    char buffer[256] = {0};
+    
+    // Test getting initial PWD (should be "/")
+    int ret = dmvfs_getpwd(buffer, sizeof(buffer));
+    if (ret != 0) {
+        TEST_FAIL("Cannot get initial PWD");
+        return false;
+    }
+    
+    if (strcmp(buffer, "/") != 0) {
+        TEST_FAIL("Initial PWD is not '/'");
+        return false;
+    }
+    
+    // Test setting PWD to a new path
+    ret = dmvfs_setpwd("/mnt/testdir");
+    if (ret != 0) {
+        TEST_FAIL("Cannot set PWD");
+        return false;
+    }
+    
+    // Verify the PWD was set correctly
+    memset(buffer, 0, sizeof(buffer));
+    ret = dmvfs_getpwd(buffer, sizeof(buffer));
+    if (ret != 0) {
+        TEST_FAIL("Cannot get PWD after setting");
+        return false;
+    }
+    
+    if (strcmp(buffer, "/mnt/testdir") != 0) {
+        TEST_FAIL("PWD not set correctly");
+        return false;
+    }
+    
+    // Reset PWD back to root
+    ret = dmvfs_setpwd("/");
+    if (ret != 0) {
+        TEST_FAIL("Cannot reset PWD to root");
+        return false;
+    }
+    
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
 //      Test: DMLIST linked list operations
 //
 // -----------------------------------------
@@ -732,6 +785,9 @@ void run_all_tests(void)
         test_directory_listing();
         test_directory_creation_and_listing();
     }
+    
+    // PWD tests (run in both modes)
+    test_pwd_operations();
     
     // DMLIST library tests (run in both modes)
     test_dmlist_operations();
