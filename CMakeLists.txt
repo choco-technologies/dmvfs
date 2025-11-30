@@ -65,10 +65,18 @@ FetchContent_MakeAvailable(dmfsi)
 # ======================================================================
 #               DMOD VFS Library definition
 # ======================================================================
-add_library(dmvfs STATIC
+# Option to include DMOD SAL implementations in the library
+option(DMVFS_INCLUDE_DMOD_SAL "Include DMOD SAL file operation implementations" ON)
+
+set(DMVFS_SOURCES
     src/dmvfs.c
-    src/dmod_sal.c
 )
+
+if(DMVFS_INCLUDE_DMOD_SAL)
+    list(APPEND DMVFS_SOURCES src/dmod_sal.c)
+endif()
+
+add_library(dmvfs STATIC ${DMVFS_SOURCES})
 
 target_include_directories(dmvfs PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>
