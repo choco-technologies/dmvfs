@@ -1,3 +1,4 @@
+#define DMOD_ENABLE_REGISTRATION
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
