@@ -67,6 +67,7 @@ FetchContent_MakeAvailable(dmfsi)
 # ======================================================================
 add_library(dmvfs STATIC
     src/dmvfs.c
+    src/dmod_sal.c
 )
 
 target_include_directories(dmvfs PUBLIC
