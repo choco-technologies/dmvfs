@@ -14,6 +14,8 @@
 #include "dmvfs.h"
 #include "dmfsi.h"
 #include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief Open a file
@@ -98,6 +100,12 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileRead, (void* Buffer, size_t S
         return 0;
     }
     
+    // Check for overflow before multiplication
+    if (Count > SIZE_MAX / Size)
+    {
+        return 0;
+    }
+    
     size_t total_size = Size * Count;
     size_t read_bytes = 0;
     
@@ -123,6 +131,12 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileRead, (void* Buffer, size_t S
 DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileWrite, (const void* Buffer, size_t Size, size_t Count, void* File))
 {
     if (Buffer == NULL || File == NULL || Size == 0 || Count == 0)
+    {
+        return 0;
+    }
+    
+    // Check for overflow before multiplication
+    if (Count > SIZE_MAX / Size)
     {
         return 0;
     }
@@ -224,8 +238,13 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileSize, (void* File))
     // Get position (which is the file size)
     long size = dmvfs_ftell(File);
     
-    // Restore original position
-    dmvfs_lseek(File, current_pos, DMFSI_SEEK_SET);
+    // Restore original position - if this fails, we have a problem
+    // but we should still return the size we got
+    if (dmvfs_lseek(File, current_pos, DMFSI_SEEK_SET) < 0)
+    {
+        // Log the issue but still return the size
+        DMOD_LOG_WARN("Failed to restore file position after getting size\n");
+    }
     
     return (size >= 0) ? (size_t)size : 0;
 }
@@ -291,6 +310,11 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, void*, _OpenDir, (const char* Path))
  * 
  * We need to store the last directory entry because the DMOD SAL API
  * returns a const char* which must persist until the next call.
+ * 
+ * @note Thread safety: This static buffer is NOT thread-safe. Concurrent
+ *       calls to _ReadDir from different threads may result in race
+ *       conditions. The DMOD SAL API design requires this pattern.
+ *       Callers should ensure thread-safe access if needed.
  */
 static char g_last_dir_entry_name[256] = {0};
 
@@ -530,22 +554,31 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileRemove, (const char* Path))
  * 
  * @return const char* Repository directory path
  * 
- * @note This function returns NULL as dmvfs doesn't have a concept of
- *       a repository directory. The caller should use environment variables
- *       or configuration to determine the repository path.
+ * @note This function returns the current working directory as a fallback
+ *       since dmvfs doesn't have a concept of a repository directory.
+ *       The caller should use environment variables or configuration 
+ *       to determine the repository path if needed.
+ * 
+ * @note Thread safety: The static buffer initialization is NOT atomic.
+ *       First-time initialization from multiple threads may result in
+ *       race conditions. However, once initialized, the buffer content
+ *       is immutable and safe to read.
  */
 DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const char*, _GetRepoDir, (void))
 {
     // Get the current working directory as a fallback
+    // Using simple static initialization - not thread-safe during first init
     static char repo_dir[256] = {0};
+    static bool initialized = false;
     
-    if (repo_dir[0] == '\0')
+    if (!initialized)
     {
         if (dmvfs_getcwd(repo_dir, sizeof(repo_dir)) != 0)
         {
             // If we can't get CWD, return root
             strcpy(repo_dir, "/");
         }
+        initialized = true;
     }
     
     return repo_dir;
