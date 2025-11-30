@@ -301,7 +301,7 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
     }
     else 
     {
-        Dmod_Context_t* fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, NULL);
+        fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, NULL);
         while(fs_context != NULL)
         {
             const char* moduleName = Dmod_GetName(fs_context);
@@ -323,7 +323,7 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
         DMOD_LOG_WARN("File system '%s' not found\n", fs_name);
     }
     unlock_mutex();
-    return NULL;
+    return fs_context;
 }
 
 /**
