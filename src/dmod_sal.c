@@ -495,6 +495,43 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, char*, _GetCwd, (char* Buffer, size_t Size
 }
 
 /**
+ * @brief Get process working directory
+ * 
+ * @param Buffer Buffer to store the path
+ * @param Size Size of the buffer
+ * @return char* Buffer on success, NULL on failure
+ */
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, char*, _GetPwd, (char* Buffer, size_t Size))
+{
+    if (Buffer == NULL || Size == 0)
+    {
+        return NULL;
+    }
+    
+    int ret = dmvfs_getpwd(Buffer, Size);
+    
+    return (ret == 0) ? Buffer : NULL;
+}
+
+/**
+ * @brief Set process working directory
+ * 
+ * @param Path Path to set as the process working directory
+ * @return int 0 on success, -1 on failure
+ */
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _SetPwd, (const char* Path))
+{
+    if (Path == NULL)
+    {
+        return -1;
+    }
+    
+    int ret = dmvfs_setpwd(Path);
+    
+    return (ret == 0) ? 0 : -1;
+}
+
+/**
  * @brief Rename a file or directory
  * 
  * @param OldPath Current path
