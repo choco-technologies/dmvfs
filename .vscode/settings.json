@@ -6,6 +6,10 @@
         "dmfsi.h": "c",
         "dmod_system.h": "c",
         "dmfsi_defs.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "stdbool.h": "c",
+        "dmod_types.h": "c",
+        "dmod_module.h": "c",
+        "dmlist.h": "c"
     }
 }
