@@ -526,9 +526,7 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _SetPwd, (const char* Path))
         return -1;
     }
     
-    int ret = dmvfs_setpwd(Path);
-    
-    return (ret == 0) ? 0 : -1;
+    return dmvfs_setpwd(Path);
 }
 
 /**
