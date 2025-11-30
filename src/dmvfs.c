@@ -292,7 +292,8 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
     if(!Dmod_IsModuleLoaded(fs_name))
     {
         fs_context = Dmod_LoadModuleByName(fs_name);
-        if(Dmod_GetDifFunction(fs_context, dmod_dmfsi_fopen_sig) == NULL)
+        if(Dmod_GetDifFunction(fs_context, dmod_dmfsi_fopen_sig) == NULL 
+        || !Dmod_Enable(fs_context, false, NULL))
         {
             DMOD_LOG_WARN("Module '%s' is not a valid file system\n", fs_name);
             Dmod_UnloadModule(fs_name, true);
