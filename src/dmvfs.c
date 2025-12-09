@@ -224,7 +224,15 @@ static const char* get_fs_path(const char* abs_path, mount_point_t* mount_point)
         return NULL;
     }
 
-    const char* fs_path = abs_path + strlen(mount_point->mount_point);
+    size_t mount_len = strlen(mount_point->mount_point);
+    const char* fs_path = abs_path + mount_len;
+    
+    // Special case: if mount point is "/" and we have more path after it
+    if (mount_len == 1 && mount_point->mount_point[0] == '/')
+    {
+        // abs_path is already the filesystem path (e.g., "/" or "/test.txt")
+        return abs_path;
+    }
     
     // Ensure the path always starts with '/'
     if (fs_path[0] == '\0' || fs_path[0] != '/')
