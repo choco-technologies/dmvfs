@@ -97,6 +97,133 @@ static char* update_string(const char* old_str, const char* new_str)
 }
 
 /**
+ * @brief Normalize path by resolving "." and ".." components
+ * @param path Input path (must be absolute, starting with '/')
+ * @return Pointer to normalized path, or NULL on failure
+ */
+static char* normalize_path(const char* path)
+{
+    if(path == NULL || path[0] != '/')
+    {
+        return NULL;
+    }
+
+    size_t path_len = strlen(path);
+    
+    // Maximum possible components (each character could be a single-char component)
+    // In practice: path_len / 2 + 1, but we use path_len for simplicity
+    size_t max_components = path_len;
+    char** components = (char**)Dmod_Malloc(sizeof(char*) * max_components);
+    if(components == NULL)
+    {
+        return NULL;
+    }
+
+    int component_count = 0;
+    
+    // Parse path into components without modifying the original
+    const char* p = path + 1; // Skip leading '/'
+    const char* start = p;
+    
+    while(1)
+    {
+        if(*p == '/' || *p == '\0')
+        {
+            size_t len = p - start;
+            if(len > 0)
+            {
+                // Create a temporary buffer for the component
+                char* component = (char*)Dmod_Malloc(len + 1);
+                if(component == NULL)
+                {
+                    // Cleanup on error
+                    for(int i = 0; i < component_count; i++)
+                    {
+                        Dmod_Free(components[i]);
+                    }
+                    Dmod_Free(components);
+                    return NULL;
+                }
+                
+                memcpy(component, start, len);
+                component[len] = '\0';
+                
+                if(strcmp(component, "..") == 0)
+                {
+                    // Go up one directory (pop from stack)
+                    Dmod_Free(component);
+                    if(component_count > 0)
+                    {
+                        Dmod_Free(components[component_count - 1]);
+                        component_count--;
+                    }
+                }
+                else if(strcmp(component, ".") != 0)
+                {
+                    // Regular component (skip ".")
+                    components[component_count] = component;
+                    component_count++;
+                }
+                else
+                {
+                    Dmod_Free(component);
+                }
+            }
+            
+            if(*p == '\0')
+            {
+                break;
+            }
+            
+            start = p + 1;
+        }
+        p++;
+    }
+
+    // Calculate required size for normalized path
+    size_t normalized_len = 1; // For root '/'
+    for(int i = 0; i < component_count; i++)
+    {
+        normalized_len += 1 + strlen(components[i]); // '/' + component
+    }
+
+    char* normalized = (char*)Dmod_Malloc(normalized_len + 1);
+    if(normalized == NULL)
+    {
+        // Cleanup on error
+        for(int i = 0; i < component_count; i++)
+        {
+            Dmod_Free(components[i]);
+        }
+        Dmod_Free(components);
+        return NULL;
+    }
+
+    // Build normalized path
+    if(component_count == 0)
+    {
+        // Root directory
+        strcpy(normalized, "/");
+    }
+    else
+    {
+        char* dest = normalized;
+        for(int i = 0; i < component_count; i++)
+        {
+            *dest++ = '/';
+            size_t comp_len = strlen(components[i]);
+            memcpy(dest, components[i], comp_len);
+            dest += comp_len;
+            Dmod_Free(components[i]);
+        }
+        *dest = '\0';
+    }
+
+    Dmod_Free(components);
+    return normalized;
+}
+
+/**
  * @brief Convert path to absolute path
  * @param path Input path
  * @return Pointer to absolute path, or NULL on failure
@@ -108,15 +235,17 @@ static char* to_absolute_path(const char* path)
         return NULL;
     }
 
+    char* abs_path = NULL;
+
     if(path[0] == '/')
     {
-        return duplicate_string(path);
+        abs_path = duplicate_string(path);
     }
     else
     {
         size_t cwd_len = (g_cwd != NULL) ? strlen(g_cwd) : 0;
         size_t path_len = strlen(path);
-        char* abs_path = (char*)Dmod_Malloc(cwd_len + 1 + path_len + 1);
+        abs_path = (char*)Dmod_Malloc(cwd_len + 1 + path_len + 1);
         if(abs_path != NULL)
         {
             if(cwd_len > 0)
@@ -131,8 +260,17 @@ static char* to_absolute_path(const char* path)
                 strcpy(abs_path + 1, path);
             }
         }
-        return abs_path;
     }
+
+    // Normalize the path to resolve "." and ".."
+    if(abs_path != NULL)
+    {
+        char* normalized = normalize_path(abs_path);
+        Dmod_Free(abs_path);
+        return normalized;
+    }
+
+    return NULL;
 }
 
 /**
