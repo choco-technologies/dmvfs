@@ -212,6 +212,38 @@ static mount_point_t* get_mount_point_for_path(const char* path)
 }
 
 /**
+ * @brief Get filesystem path from absolute path
+ * @param abs_path Absolute path
+ * @param mount_point Mount point entry
+ * @return Pointer to the path to pass to filesystem (always starts with '/')
+ */
+static const char* get_fs_path(const char* abs_path, mount_point_t* mount_point)
+{
+    if (abs_path == NULL || mount_point == NULL || mount_point->mount_point == NULL)
+    {
+        return NULL;
+    }
+
+    size_t mount_len = strlen(mount_point->mount_point);
+    const char* fs_path = abs_path + mount_len;
+    
+    // Special case: if mount point is "/" (root), the absolute path is already valid
+    if (mount_len == 1 && mount_point->mount_point[0] == '/')
+    {
+        // abs_path is already the filesystem path (e.g., "/" or "/test.txt")
+        return abs_path;
+    }
+    
+    // Ensure the path always starts with '/', or return "/" for empty paths
+    if (fs_path[0] != '/')
+    {
+        return "/";
+    }
+    
+    return fs_path;
+}
+
+/**
  * @brief Find free file entry
  * @return Pointer to free file entry, or NULL if none available
  */
@@ -773,7 +805,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
     }
 
     void* fs_file = NULL;
-    int result = fopen_func(mp_entry->mount_context, &fs_file, abs_path + strlen(mp_entry->mount_point), mode, attr);
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = fopen_func(mp_entry->mount_context, &fs_file, fs_path, mode, attr);
     Dmod_Free((void*)abs_path);
 
     if (fs_file == NULL || result != 0)
@@ -1375,8 +1408,10 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _remove, (const char* path))
     dmod_dmfsi_unlink_t remove_func = (dmod_dmfsi_unlink_t)Dmod_GetDifFunction(
         mp_entry->fs_context, dmod_dmfsi_unlink_sig);
     int result = -1;
-    if (remove_func)
-        result = remove_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point));
+    if (remove_func) {
+        const char* fs_path = get_fs_path(abs_path, mp_entry);
+        result = remove_func(mp_entry->mount_context, fs_path);
+    }
     Dmod_Free((void*)abs_path);
     unlock_mutex();
     return result;
@@ -1420,8 +1455,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rename, (const char* oldpath, const
     dmod_dmfsi_rename_t rename_func = (dmod_dmfsi_rename_t)Dmod_GetDifFunction(
         mp_entry->fs_context, dmod_dmfsi_rename_sig);
     int result = -1;
-    if (rename_func)
-        result = rename_func(mp_entry->mount_context, abs_old + strlen(mp_entry->mount_point), abs_new + strlen(mp_entry->mount_point));
+    if (rename_func) {
+        const char* fs_path_old = get_fs_path(abs_old, mp_entry);
+        const char* fs_path_new = get_fs_path(abs_new, mp_entry);
+        result = rename_func(mp_entry->mount_context, fs_path_old, fs_path_new);
+    }
     Dmod_Free((void*)abs_old);
     Dmod_Free((void*)abs_new);
     unlock_mutex();
@@ -1534,8 +1572,10 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _stat, (const char* path, dmfsi_stat
     dmod_dmfsi_stat_t stat_func = (dmod_dmfsi_stat_t)Dmod_GetDifFunction(
         mp_entry->fs_context, dmod_dmfsi_stat_sig);
     int result = -1;
-    if (stat_func)
-        result = stat_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point), stat);
+    if (stat_func) {
+        const char* fs_path = get_fs_path(abs_path, mp_entry);
+        result = stat_func(mp_entry->mount_context, fs_path, stat);
+    }
     Dmod_Free((void*)abs_path);
     unlock_mutex();
     return result;
@@ -1664,7 +1704,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chmod, (const char* path, int mode)
         return -1;
     }
 
-    int result = chmod_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point), mode);
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = chmod_func(mp_entry->mount_context, fs_path, mode);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
@@ -1731,7 +1772,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _utime, (const char* path, uint32_t 
         return -1;
     }
 
-    int result = utime_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point), atime, mtime);
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = utime_func(mp_entry->mount_context, fs_path, atime, mtime);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
@@ -1796,7 +1838,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _unlink, (const char* path))
         return -1;
     }
 
-    int result = unlink_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point));
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = unlink_func(mp_entry->mount_context, fs_path);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
@@ -1862,7 +1905,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _mkdir, (const char* path, int mode)
         return -1;
     }
 
-    int result = mkdir_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point), mode);
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = mkdir_func(mp_entry->mount_context, fs_path, mode);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
@@ -1926,7 +1970,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rmdir, (const char* path))
         return -1;
     }
 
-    int result = rmdir_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point));
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = rmdir_func(mp_entry->mount_context, fs_path);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
@@ -1983,7 +2028,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chdir, (const char* path))
     dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)Dmod_GetDifFunction(
         mp_entry->fs_context, dmod_dmfsi_direxists_sig);
 
-    if (!direxists_func || !direxists_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point)))
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    if (!direxists_func || !direxists_func(mp_entry->mount_context, fs_path))
     {
         DMOD_LOG_ERROR("Directory '%s' does not exist\n", abs_path);
         Dmod_Free((void*)abs_path);
@@ -2059,7 +2105,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     }
 
     void* dir_handle = NULL;
-    int result = opendir_func(mp_entry->mount_context, &dir_handle, abs_path + strlen(mp_entry->mount_point));
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = opendir_func(mp_entry->mount_context, &dir_handle, fs_path);
     Dmod_Free((void*)abs_path);
 
     if (result != 0 || dir_handle == NULL)
@@ -2247,7 +2294,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _direxists, (const char* path))
         return -1;
     }
 
-    int result = direxists_func(mp_entry->mount_context, abs_path + strlen(mp_entry->mount_point));
+    const char* fs_path = get_fs_path(abs_path, mp_entry);
+    int result = direxists_func(mp_entry->mount_context, fs_path);
     Dmod_Free((void*)abs_path);
     unlock_mutex();
 
