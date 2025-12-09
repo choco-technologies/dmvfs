@@ -2226,7 +2226,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     mount_point_t* mp_entry = get_mount_point_for_path(abs_path);
     if (!mp_entry)
     {
-        DMOD_LOG_ERROR("No mount point found for path '%s'\n", abs_path);
+        DMOD_LOG_VERBOSE("No mount point found for path '%s'\n", abs_path);
         Dmod_Free((void*)abs_path);
         unlock_mutex();
         return -1;
@@ -2237,7 +2237,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
 
     if (!opendir_func)
     {
-        DMOD_LOG_ERROR("File system does not support opendir for path '%s'\n", abs_path);
+        DMOD_LOG_VERBOSE("File system does not support opendir for path '%s'\n", abs_path);
         Dmod_Free((void*)abs_path);
         unlock_mutex();
         return -1;
@@ -2250,7 +2250,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
 
     if (result != 0 || dir_handle == NULL)
     {
-        DMOD_LOG_ERROR("Failed to open directory '%s'\n", path);
+        DMOD_LOG_VERBOSE("Failed to open directory '%s'\n", path);
         unlock_mutex();
         return -1;
     }
