@@ -108,67 +108,96 @@ static char* normalize_path(const char* path)
         return NULL;
     }
 
-    // Allocate buffer for normalized path
     size_t path_len = strlen(path);
-    char* normalized = (char*)Dmod_Malloc(path_len + 1);
-    if(normalized == NULL)
-    {
-        return NULL;
-    }
-
-    // Track components using a stack approach
-    char** components = (char**)Dmod_Malloc(sizeof(char*) * (path_len + 1));
+    
+    // Maximum possible components (each character could be a single-char component)
+    // In practice: path_len / 2 + 1, but we use path_len for simplicity
+    size_t max_components = path_len;
+    char** components = (char**)Dmod_Malloc(sizeof(char*) * max_components);
     if(components == NULL)
     {
-        Dmod_Free(normalized);
         return NULL;
     }
 
     int component_count = 0;
     
-    // Parse path into components
-    char* path_copy = duplicate_string(path);
-    if(path_copy == NULL)
+    // Parse path into components without modifying the original
+    const char* p = path + 1; // Skip leading '/'
+    const char* start = p;
+    
+    while(1)
     {
-        Dmod_Free(normalized);
+        if(*p == '/' || *p == '\0')
+        {
+            size_t len = p - start;
+            if(len > 0)
+            {
+                // Create a temporary buffer for the component
+                char* component = (char*)Dmod_Malloc(len + 1);
+                if(component == NULL)
+                {
+                    // Cleanup on error
+                    for(int i = 0; i < component_count; i++)
+                    {
+                        Dmod_Free(components[i]);
+                    }
+                    Dmod_Free(components);
+                    return NULL;
+                }
+                
+                memcpy(component, start, len);
+                component[len] = '\0';
+                
+                if(strcmp(component, "..") == 0)
+                {
+                    // Go up one directory (pop from stack)
+                    Dmod_Free(component);
+                    if(component_count > 0)
+                    {
+                        Dmod_Free(components[component_count - 1]);
+                        component_count--;
+                    }
+                }
+                else if(strcmp(component, ".") != 0)
+                {
+                    // Regular component (skip ".")
+                    components[component_count] = component;
+                    component_count++;
+                }
+                else
+                {
+                    Dmod_Free(component);
+                }
+            }
+            
+            if(*p == '\0')
+            {
+                break;
+            }
+            
+            start = p + 1;
+        }
+        p++;
+    }
+
+    // Calculate required size for normalized path
+    size_t normalized_len = 1; // For root '/'
+    for(int i = 0; i < component_count; i++)
+    {
+        normalized_len += 1 + strlen(components[i]); // '/' + component
+    }
+
+    char* normalized = (char*)Dmod_Malloc(normalized_len + 1);
+    if(normalized == NULL)
+    {
+        // Cleanup on error
+        for(int i = 0; i < component_count; i++)
+        {
+            Dmod_Free(components[i]);
+        }
         Dmod_Free(components);
         return NULL;
     }
-
-    char* token = strtok(path_copy, "/");
-    while(token != NULL)
-    {
-        if(strcmp(token, "..") == 0)
-        {
-            // Go up one directory (pop from stack)
-            if(component_count > 0)
-            {
-                Dmod_Free(components[component_count - 1]);
-                component_count--;
-            }
-        }
-        else if(strcmp(token, ".") != 0 && strlen(token) > 0)
-        {
-            // Regular component (skip "." and empty strings)
-            components[component_count] = duplicate_string(token);
-            if(components[component_count] == NULL)
-            {
-                // Cleanup on error
-                for(int i = 0; i < component_count; i++)
-                {
-                    Dmod_Free(components[i]);
-                }
-                Dmod_Free(components);
-                Dmod_Free(normalized);
-                Dmod_Free(path_copy);
-                return NULL;
-            }
-            component_count++;
-        }
-        token = strtok(NULL, "/");
-    }
-
-    Dmod_Free(path_copy);
 
     // Build normalized path
     if(component_count == 0)
@@ -178,13 +207,16 @@ static char* normalize_path(const char* path)
     }
     else
     {
-        normalized[0] = '\0';
+        char* dest = normalized;
         for(int i = 0; i < component_count; i++)
         {
-            strcat(normalized, "/");
-            strcat(normalized, components[i]);
+            *dest++ = '/';
+            size_t comp_len = strlen(components[i]);
+            memcpy(dest, components[i], comp_len);
+            dest += comp_len;
             Dmod_Free(components[i]);
         }
+        *dest = '\0';
     }
 
     Dmod_Free(components);
