@@ -506,6 +506,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _init, (int max_mount_points, int m
     }
 
     memset(g_mount_points, 0, sizeof(mount_point_t) * max_mount_points);
+    memset(g_open_files, 0, sizeof(file_t) * max_open_files);
     g_max_mount_points = max_mount_points;
     g_max_open_files = max_open_files;
 
