@@ -555,7 +555,6 @@ static mount_point_t* add_mount_point(const char* mount_point, Dmod_Context_t* f
     strcpy(free_entry->mount_point, mount_point);
     free_entry->fs_context = fs_context;
     return free_entry;
-    return NULL;
 }
 
 /**
