@@ -2356,7 +2356,6 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     void* dir_handle = NULL;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
     int result = opendir_func(mp_entry->mount_context, &dir_handle, fs_path);
-    Dmod_Free((void*)abs_path);
 
     if (result != 0 || dir_handle == NULL)
     {
