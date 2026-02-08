@@ -39,6 +39,9 @@ _codeql_detected_source_root
 *.exe
 *.out
 *.app
+test_helpers
+mount_point_test
+simple_test
 
 # debug information files
 *.dwo
