@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     if (argc < 3) {
         printf("Usage: %s <fs1_module.dmf> <fs2_module.dmf>\n", argv[0]);
         printf("This test requires two filesystem modules to test mount point selection.\n");
-        return 1;
+        return -1;
     }
 
     const char* fs1_path = argv[1];

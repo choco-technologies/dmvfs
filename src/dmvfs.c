@@ -344,7 +344,16 @@ static mount_point_t* get_mount_point_for_path(const char* path)
         if(g_mount_points[i].mount_point != NULL)
         {
             size_t mount_point_length = strlen(g_mount_points[i].mount_point);
+            // Check if path starts with mount point and either:
+            // - The mount point is the root "/" (special case - matches all paths)
+            // - The mount point is exactly the path (path[mount_point_length] == '\0')
+            // - The next character is a path separator (path[mount_point_length] == '/')
+            // This ensures we match at path boundaries only
+            bool is_root_mount = (mount_point_length == 1 && g_mount_points[i].mount_point[0] == '/');
+            bool is_boundary_match = (path[mount_point_length] == '/' || path[mount_point_length] == '\0');
+            
             if(strncmp(path, g_mount_points[i].mount_point, mount_point_length) == 0 &&
+               (is_root_mount || is_boundary_match) &&
                mount_point_length > best_match_length)
             {
                 best_match = &g_mount_points[i];
