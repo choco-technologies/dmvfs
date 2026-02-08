@@ -2485,11 +2485,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
             is_direct_child_mount(dir_wrapper->abs_path, g_mount_points[i].mount_point))
         {
             // Found a mount point to inject
-            char basename[256];
-            get_basename(g_mount_points[i].mount_point, basename, sizeof(basename));
+            char mount_name[sizeof(entry->name)];
+            get_basename(g_mount_points[i].mount_point, mount_name, sizeof(mount_name));
             
             // Fill in the directory entry
-            strncpy(entry->name, basename, sizeof(entry->name) - 1);
+            strncpy(entry->name, mount_name, sizeof(entry->name) - 1);
             entry->name[sizeof(entry->name) - 1] = '\0';
             entry->size = 0;
             entry->attr = DMFSI_ATTR_DIRECTORY;
@@ -2498,7 +2498,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
             // Move to the next index
             dir_wrapper->mount_point_index = i + 1;
             
-            DMOD_LOG_VERBOSE("Injected mount point '%s' into directory listing\n", basename);
+            DMOD_LOG_VERBOSE("Injected mount point '%s' into directory listing\n", mount_name);
             unlock_mutex();
             return 0;
         }
@@ -2557,13 +2557,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
     // Close the underlying filesystem directory
     int result = closedir_func(dir_entry->mount_point->mount_context, dir_wrapper->fs_dir);
 
-    if (result != 0)
-    {
-        DMOD_LOG_ERROR("Failed to close directory\n");
-        // Continue cleanup even if close failed
-    }
-
-    // Free the wrapper resources
+    // Free the wrapper resources even if close failed
     if (dir_wrapper->abs_path) {
         Dmod_Free(dir_wrapper->abs_path);
     }
@@ -2571,6 +2565,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
 
     dir_entry->mount_point = NULL;
     dir_entry->fs_file = NULL;
+
+    if (result != 0)
+    {
+        DMOD_LOG_ERROR("Failed to close directory in underlying filesystem\n");
+        unlock_mutex();
+        return -1;
+    }
 
     DMOD_LOG_INFO("Directory closed successfully\n");
     unlock_mutex();
