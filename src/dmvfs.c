@@ -336,17 +336,29 @@ static mount_point_t* get_mount_point_for_path(const char* path)
         return NULL;
     }
 
+    mount_point_t* best_match = NULL;
+    size_t best_match_length = 0;
+
     for(int i = 0; i < g_max_mount_points; i++)
     {
-        if(g_mount_points[i].mount_point != NULL &&
-           strncmp(path, g_mount_points[i].mount_point, strlen(g_mount_points[i].mount_point)) == 0)
+        if(g_mount_points[i].mount_point != NULL)
         {
-            return &g_mount_points[i];
+            size_t mount_point_length = strlen(g_mount_points[i].mount_point);
+            if(strncmp(path, g_mount_points[i].mount_point, mount_point_length) == 0 &&
+               mount_point_length > best_match_length)
+            {
+                best_match = &g_mount_points[i];
+                best_match_length = mount_point_length;
+            }
         }
     }
 
-    DMOD_LOG_WARN("No mount point found for path '%s'\n", path);
-    return NULL;
+    if(best_match == NULL)
+    {
+        DMOD_LOG_WARN("No mount point found for path '%s'\n", path);
+    }
+
+    return best_match;
 }
 
 /**
