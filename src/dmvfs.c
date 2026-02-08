@@ -1,6 +1,7 @@
 #define ENABLE_DIF_REGISTRATIONS    ON
 #include "dmvfs.h"
 #include <string.h>
+#include <stdbool.h>
 
 typedef struct {
     Dmod_Context_t* fs_context;
@@ -13,6 +14,18 @@ typedef struct {
     void* fs_file;
     int pid;
 } file_t;
+
+/**
+ * @brief Directory handle wrapper to inject mount points
+ */
+typedef struct {
+    mount_point_t* mount_point;    // Mount point for the directory
+    void* fs_dir;                  // Underlying filesystem directory handle
+    char* abs_path;                // Absolute path of the directory being listed
+    bool fs_exhausted;             // True when underlying FS has no more entries
+    int mount_point_index;         // Current index in mount point injection (-1 = not started)
+    int pid;                       // Process ID
+} dir_handle_t;
 
 static mount_point_t* g_mount_points = NULL;
 static int g_max_mount_points = 0;
@@ -403,6 +416,83 @@ static const char* get_fs_path(const char* abs_path, mount_point_t* mount_point)
 }
 
 /**
+ * @brief Check if a mount point is a direct child of a directory path
+ * @param dir_path Absolute directory path (e.g., "/")
+ * @param mount_path Mount point path (e.g., "/configs")
+ * @return true if mount_path is a direct child of dir_path
+ */
+static bool is_direct_child_mount(const char* dir_path, const char* mount_path)
+{
+    if (!dir_path || !mount_path) {
+        return false;
+    }
+    
+    size_t dir_len = strlen(dir_path);
+    size_t mount_len = strlen(mount_path);
+    
+    // Mount path must be longer than directory path
+    if (mount_len <= dir_len) {
+        return false;
+    }
+    
+    // Check if mount_path starts with dir_path
+    if (strncmp(dir_path, mount_path, dir_len) != 0) {
+        return false;
+    }
+    
+    // For root directory "/", check that mount path doesn't have more than one additional slash
+    if (dir_len == 1 && dir_path[0] == '/') {
+        // Find first slash after root
+        const char* next_slash = strchr(mount_path + 1, '/');
+        // It's a direct child if there's no slash after the first character
+        return (next_slash == NULL);
+    }
+    
+    // For non-root directories, ensure the mount point is exactly one level deeper
+    // mount_path should be: dir_path + "/" + name (no additional slashes)
+    const char* remainder = mount_path + dir_len;
+    if (remainder[0] != '/') {
+        return false;
+    }
+    
+    // Check that there are no more slashes after this point
+    const char* next_slash = strchr(remainder + 1, '/');
+    return (next_slash == NULL);
+}
+
+/**
+ * @brief Extract the base name from a path (last component)
+ * @param path Full path (e.g., "/configs" or "/a/b/c")
+ * @param buffer Buffer to store the base name
+ * @param buffer_size Size of the buffer
+ */
+static void get_basename(const char* path, char* buffer, size_t buffer_size)
+{
+    if (!path || !buffer || buffer_size == 0) {
+        return;
+    }
+    
+    // Find the last slash
+    const char* last_slash = strrchr(path, '/');
+    if (!last_slash) {
+        // No slash found, use the entire path
+        strncpy(buffer, path, buffer_size - 1);
+        buffer[buffer_size - 1] = '\0';
+        return;
+    }
+    
+    // If it's the root "/" itself
+    if (last_slash == path && last_slash[1] == '\0') {
+        buffer[0] = '\0';
+        return;
+    }
+    
+    // Copy everything after the last slash
+    strncpy(buffer, last_slash + 1, buffer_size - 1);
+    buffer[buffer_size - 1] = '\0';
+}
+
+/**
  * @brief Find free file entry
  * @return Pointer to free file entry, or NULL if none available
  */
@@ -694,7 +784,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _init, (int max_mount_points, int m
         return false;
     }
 
-    DMOD_LOG_INFO("== dmvfs ver " DMVFS_VERSION " ==\n");
+    DMOD_LOG_INFO("== dmvfs ver %s ==\n", DMVFS_VERSION);
     DMOD_LOG_INFO("DMVFS initialized with max mount points: %d\n", max_mount_points);
     return true;
 }
@@ -2271,18 +2361,53 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     if (result != 0 || dir_handle == NULL)
     {
         DMOD_LOG_VERBOSE("Failed to open directory '%s'\n", path);
+        Dmod_Free((void*)abs_path);
         unlock_mutex();
         return -1;
     }
 
+    // Create a directory handle wrapper
+    dir_handle_t* dir_wrapper = (dir_handle_t*)Dmod_Malloc(sizeof(dir_handle_t));
+    if (!dir_wrapper) {
+        DMOD_LOG_ERROR("Failed to allocate directory handle wrapper\n");
+        // Close the opened directory
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
+            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        if (closedir_func) {
+            closedir_func(mp_entry->mount_context, dir_handle);
+        }
+        Dmod_Free((void*)abs_path);
+        unlock_mutex();
+        return -1;
+    }
+    
+    // Initialize the wrapper
+    dir_wrapper->mount_point = mp_entry;
+    dir_wrapper->fs_dir = dir_handle;
+    dir_wrapper->abs_path = duplicate_string(abs_path);
+    dir_wrapper->fs_exhausted = false;
+    dir_wrapper->mount_point_index = -1;
+    dir_wrapper->pid = 0;
+    
+    Dmod_Free((void*)abs_path);
+
+    // Find a free file entry to track this directory handle
     file_t* free_entry = find_free_file_entry();
     if (free_entry == NULL) {
         DMOD_LOG_ERROR("No free file entries available for directory\n");
+        // Cleanup
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
+            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        if (closedir_func) {
+            closedir_func(mp_entry->mount_context, dir_handle);
+        }
+        Dmod_Free(dir_wrapper->abs_path);
+        Dmod_Free(dir_wrapper);
         unlock_mutex();
         return -1;
     }
     free_entry->mount_point = mp_entry;
-    free_entry->fs_file = dir_handle;
+    free_entry->fs_file = dir_wrapper;
     free_entry->pid = 0; 
 
     *dp = free_entry;
@@ -2323,26 +2448,67 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
         return -1;
     }
 
-    dmod_dmfsi_readdir_t readdir_func = (dmod_dmfsi_readdir_t)Dmod_GetDifFunction(
-        dir_entry->mount_point->fs_context, dmod_dmfsi_readdir_sig);
+    // Get the directory wrapper
+    dir_handle_t* dir_wrapper = (dir_handle_t*)dir_entry->fs_file;
 
-    if (!readdir_func)
+    // First, try to read from the underlying filesystem
+    if (!dir_wrapper->fs_exhausted)
     {
-        DMOD_LOG_ERROR("File system does not support readdir\n");
-        unlock_mutex();
-        return -1;
+        dmod_dmfsi_readdir_t readdir_func = (dmod_dmfsi_readdir_t)Dmod_GetDifFunction(
+            dir_entry->mount_point->fs_context, dmod_dmfsi_readdir_sig);
+
+        if (!readdir_func)
+        {
+            DMOD_LOG_ERROR("File system does not support readdir\n");
+            unlock_mutex();
+            return -1;
+        }
+
+        int result = readdir_func(dir_entry->mount_point->mount_context, dir_wrapper->fs_dir, entry);
+        
+        if (result == 0)
+        {
+            // Successfully read an entry from the filesystem
+            unlock_mutex();
+            return 0;
+        }
+        
+        // Filesystem has no more entries, mark as exhausted
+        dir_wrapper->fs_exhausted = true;
+        dir_wrapper->mount_point_index = 0; // Start injecting mount points
     }
 
-    int result = readdir_func(dir_entry->mount_point->mount_context, dir_entry->fs_file, entry);
+    // Now inject mount point entries
+    // Find the next child mount point to inject
+    for (int i = dir_wrapper->mount_point_index; i < g_max_mount_points; i++)
+    {
+        if (g_mount_points[i].mount_point != NULL &&
+            is_direct_child_mount(dir_wrapper->abs_path, g_mount_points[i].mount_point))
+        {
+            // Found a mount point to inject
+            char basename[256];
+            get_basename(g_mount_points[i].mount_point, basename, sizeof(basename));
+            
+            // Fill in the directory entry
+            strncpy(entry->name, basename, sizeof(entry->name) - 1);
+            entry->name[sizeof(entry->name) - 1] = '\0';
+            entry->size = 0;
+            entry->attr = DMFSI_ATTR_DIRECTORY;
+            entry->time = 0;
+            
+            // Move to the next index
+            dir_wrapper->mount_point_index = i + 1;
+            
+            DMOD_LOG_VERBOSE("Injected mount point '%s' into directory listing\n", basename);
+            unlock_mutex();
+            return 0;
+        }
+    }
+
+    // No more entries (neither from FS nor from mount points)
+    DMOD_LOG_VERBOSE("End of directory\n");
     unlock_mutex();
-
-    if (result != 0)
-    {
-        DMOD_LOG_VERBOSE("End of directory or error reading directory\n");
-        return -1;
-    }
-
-    return 0;
+    return -1;
 }
 /**
  * @brief Close an open directory in DMVFS
@@ -2376,6 +2542,9 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
         return -1;
     }
 
+    // Get the directory wrapper
+    dir_handle_t* dir_wrapper = (dir_handle_t*)dir_entry->fs_file;
+
     dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
         dir_entry->mount_point->fs_context, dmod_dmfsi_closedir_sig);
 
@@ -2386,14 +2555,20 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
         return -1;
     }
 
-    int result = closedir_func(dir_entry->mount_point->mount_context, dir_entry->fs_file);
+    // Close the underlying filesystem directory
+    int result = closedir_func(dir_entry->mount_point->mount_context, dir_wrapper->fs_dir);
 
     if (result != 0)
     {
         DMOD_LOG_ERROR("Failed to close directory\n");
-        unlock_mutex();
-        return -1;
+        // Continue cleanup even if close failed
     }
+
+    // Free the wrapper resources
+    if (dir_wrapper->abs_path) {
+        Dmod_Free(dir_wrapper->abs_path);
+    }
+    Dmod_Free(dir_wrapper);
 
     dir_entry->mount_point = NULL;
     dir_entry->fs_file = NULL;
