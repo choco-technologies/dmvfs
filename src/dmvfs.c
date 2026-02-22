@@ -58,7 +58,10 @@ static inline bool lock_mutex(void)
     {
         return (Dmod_Mutex_Lock(g_mutex) == 0);
     }
-    Dmod_EnterCritical();
+    else 
+    {
+        Dmod_EnterCritical();
+    }
     return true;
 }
 
@@ -71,7 +74,10 @@ static inline void unlock_mutex(void)
     {
         Dmod_Mutex_Unlock(g_mutex);
     }
-    Dmod_ExitCritical();
+    else 
+    {
+        Dmod_ExitCritical();
+    }
 }
 
 /**
