@@ -2,6 +2,7 @@
 #include "dmvfs.h"
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 
 typedef struct {
     Dmod_Context_t* fs_context;
@@ -56,7 +57,18 @@ static inline bool lock_mutex(void)
     }
     if(g_mutex != NULL)
     {
-        return (Dmod_Mutex_Lock(g_mutex) == 0);
+        int ret = Dmod_Mutex_Lock(g_mutex);
+        if (ret == 0)
+        {
+            return true;
+        }
+        else if (ret == -ENOTSUP)
+        {
+            /* RTOS has not started yet - fall back to critical sections */
+            Dmod_EnterCritical();
+            return true;
+        }
+        return false;
     }
     else 
     {
@@ -72,7 +84,12 @@ static inline void unlock_mutex(void)
 {
     if(g_mutex != NULL)
     {
-        Dmod_Mutex_Unlock(g_mutex);
+        int ret = Dmod_Mutex_Unlock(g_mutex);
+        if (ret == -ENOTSUP)
+        {
+            /* RTOS has not started yet - we used critical sections for locking */
+            Dmod_ExitCritical();
+        }
     }
     else 
     {
