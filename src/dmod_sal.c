@@ -347,6 +347,49 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const char*, _ReadDir, (void* Dir))
 }
 
 /**
+ * @brief Read the next directory entry with extended information
+ * 
+ * @param Dir Directory handle
+ * @return const Dmod_DirEntry_t* Pointer to entry info, or NULL if no more entries
+ * 
+ * @note The returned pointer points to static storage that may be overwritten by subsequent calls.
+ *       Not thread-safe: use separate directory handles per thread.
+ */
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const Dmod_DirEntry_t*, _ReadDirEx, (void* Dir))
+{
+    if (Dir == NULL)
+    {
+        return NULL;
+    }
+
+    dmfsi_dir_entry_t entry;
+    int ret = dmvfs_readdir(Dir, &entry);
+
+    if (ret != 0)
+    {
+        return NULL;
+    }
+
+    // Copy entry name to persistent storage (reuse the existing buffer)
+    strncpy(g_last_dir_entry_name, entry.name, sizeof(g_last_dir_entry_name) - 1);
+    g_last_dir_entry_name[sizeof(g_last_dir_entry_name) - 1] = '\0';
+
+    // Map dmfsi attr flags to Dmod_DirEntryType_t
+    static Dmod_DirEntry_t g_last_dir_entry;
+    g_last_dir_entry.name = g_last_dir_entry_name;
+    if (entry.attr & DMFSI_ATTR_DIRECTORY)
+    {
+        g_last_dir_entry.type = Dmod_DirEntryType_Dir;
+    }
+    else
+    {
+        g_last_dir_entry.type = Dmod_DirEntryType_File;
+    }
+
+    return &g_last_dir_entry;
+}
+
+/**
  * @brief Close a directory
  * 
  * @param Dir Directory handle
