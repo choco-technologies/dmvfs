@@ -306,17 +306,19 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, void*, _OpenDir, (const char* Path))
 }
 
 /**
- * @brief Directory entry storage for ReadDir
+ * @brief Directory entry storage for ReadDir and ReadDirEx
  * 
  * We need to store the last directory entry because the DMOD SAL API
- * returns a const char* which must persist until the next call.
+ * returns a const char* / const Dmod_DirEntry_t* which must persist until
+ * the next call.
  * 
- * @note Thread safety: This static buffer is NOT thread-safe. Concurrent
- *       calls to _ReadDir from different threads may result in race
- *       conditions. The DMOD SAL API design requires this pattern.
+ * @note Thread safety: These static buffers are NOT thread-safe. Concurrent
+ *       calls to _ReadDir or _ReadDirEx from different threads may result in
+ *       race conditions. The DMOD SAL API design requires this pattern.
  *       Callers should ensure thread-safe access if needed.
  */
 static char g_last_dir_entry_name[256] = {0};
+static Dmod_DirEntry_t g_last_dir_entry = {0};
 
 /**
  * @brief Read the next directory entry
@@ -375,7 +377,6 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const Dmod_DirEntry_t*, _ReadDirEx, (void*
     g_last_dir_entry_name[sizeof(g_last_dir_entry_name) - 1] = '\0';
 
     // Map dmfsi attr flags to Dmod_DirEntryType_t
-    static Dmod_DirEntry_t g_last_dir_entry;
     g_last_dir_entry.name = g_last_dir_entry_name;
     if (entry.attr & DMFSI_ATTR_DIRECTORY)
     {
