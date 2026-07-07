@@ -99,23 +99,36 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileRead, (void* Buffer, size_t S
     {
         return 0;
     }
-    
+
     // Check for overflow before multiplication
     if (Count > SIZE_MAX / Size)
     {
         return 0;
     }
-    
+
     size_t total_size = Size * Count;
+
+    // DMOD_STDIN/OUT/ERR/LOG are virtual stream handles, not dmvfs file_t*
+    // pointers. Resolve them first: if nothing is bound to the stream for
+    // the current process, fall back to the raw kernel I/O used before any
+    // real file is attached (this is also what the dmod default weak
+    // Dmod_FileRead does).
+    void* resolvedFile = Dmod_LockStdio(File);
+    if (resolvedFile == NULL)
+    {
+        size_t read = Dmod_ReadKernel(Buffer, total_size);
+        return read / Size;
+    }
+
     size_t read_bytes = 0;
-    
-    int ret = dmvfs_fread(File, Buffer, total_size, &read_bytes);
-    
+    int ret = dmvfs_fread(resolvedFile, Buffer, total_size, &read_bytes);
+    Dmod_UnlockStdio(File);
+
     if (ret != 0)
     {
         return 0;
     }
-    
+
     return read_bytes / Size;
 }
 
@@ -134,23 +147,39 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileWrite, (const void* Buffer, s
     {
         return 0;
     }
-    
+
     // Check for overflow before multiplication
     if (Count > SIZE_MAX / Size)
     {
         return 0;
     }
-    
+
     size_t total_size = Size * Count;
+
+    // DMOD_STDIN/OUT/ERR/LOG are virtual stream handles, not dmvfs file_t*
+    // pointers. Resolve them first: if nothing is bound to the stream for
+    // the current process, fall back to the raw kernel I/O used before any
+    // real file is attached (this is also what the dmod default weak
+    // Dmod_FileWrite does). Without this, Dmod_Printf(DMOD_STDOUT) before
+    // dmvfs is initialized recurses forever: dmvfs_fwrite() sees "not
+    // initialized", logs an error via Dmod_Printf, which calls back into
+    // this same function.
+    void* resolvedFile = Dmod_LockStdio(File);
+    if (resolvedFile == NULL)
+    {
+        size_t written = Dmod_WriteKernel(Buffer, total_size);
+        return written / Size;
+    }
+
     size_t written_bytes = 0;
-    
-    int ret = dmvfs_fwrite(File, Buffer, total_size, &written_bytes);
-    
+    int ret = dmvfs_fwrite(resolvedFile, Buffer, total_size, &written_bytes);
+    Dmod_UnlockStdio(File);
+
     if (ret != 0)
     {
         return 0;
     }
-    
+
     return written_bytes / Size;
 }
 
