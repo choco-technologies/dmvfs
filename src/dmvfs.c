@@ -109,7 +109,7 @@ static char* duplicate_string(const char* str)
         return NULL;
     }
 
-    char* dup = Dmod_Malloc(strlen(str) + 1);
+    char* dup = Dmod_MallocEx(strlen(str) + 1, DMVFS_ALLOCATOR_NAME);
     if(dup != NULL)
     {
         strcpy(dup, str);
@@ -149,7 +149,7 @@ static char* normalize_path(const char* path)
     // Maximum possible components (each character could be a single-char component)
     // In practice: path_len / 2 + 1, but we use path_len for simplicity
     size_t max_components = path_len;
-    char** components = (char**)Dmod_Malloc(sizeof(char*) * max_components);
+    char** components = (char**)Dmod_MallocEx(sizeof(char*) * max_components, DMVFS_ALLOCATOR_NAME);
     if(components == NULL)
     {
         return NULL;
@@ -169,7 +169,7 @@ static char* normalize_path(const char* path)
             if(len > 0)
             {
                 // Create a temporary buffer for the component
-                char* component = (char*)Dmod_Malloc(len + 1);
+                char* component = (char*)Dmod_MallocEx(len + 1, DMVFS_ALLOCATOR_NAME);
                 if(component == NULL)
                 {
                     // Cleanup on error
@@ -223,7 +223,7 @@ static char* normalize_path(const char* path)
         normalized_len += 1 + strlen(components[i]); // '/' + component
     }
 
-    char* normalized = (char*)Dmod_Malloc(normalized_len + 1);
+    char* normalized = (char*)Dmod_MallocEx(normalized_len + 1, DMVFS_ALLOCATOR_NAME);
     if(normalized == NULL)
     {
         // Cleanup on error
@@ -281,7 +281,7 @@ static char* to_absolute_path(const char* path)
     {
         size_t cwd_len = (g_cwd != NULL) ? strlen(g_cwd) : 0;
         size_t path_len = strlen(path);
-        abs_path = (char*)Dmod_Malloc(cwd_len + 1 + path_len + 1);
+        abs_path = (char*)Dmod_MallocEx(cwd_len + 1 + path_len + 1, DMVFS_ALLOCATOR_NAME);
         if(abs_path != NULL)
         {
             if(cwd_len > 0)
@@ -678,7 +678,7 @@ static mount_point_t* add_mount_point(const char* mount_point, Dmod_Context_t* f
         }
     }
 
-    free_entry->mount_point = Dmod_Malloc(strlen(mount_point) + 1);
+    free_entry->mount_point = Dmod_MallocEx(strlen(mount_point) + 1, DMVFS_ALLOCATOR_NAME);
     if(free_entry->mount_point == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for mount point\n");
@@ -760,14 +760,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _init, (int max_mount_points, int m
         return false;
     }
 
-    g_mount_points = (mount_point_t*)Dmod_Malloc(sizeof(mount_point_t) * max_mount_points);
+    g_mount_points = (mount_point_t*)Dmod_MallocEx(sizeof(mount_point_t) * max_mount_points, DMVFS_ALLOCATOR_NAME);
     if (g_mount_points == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for mount points\n");
         return false;
     }
 
-    g_open_files = (file_t*)Dmod_Malloc(sizeof(file_t) * max_open_files);
+    g_open_files = (file_t*)Dmod_MallocEx(sizeof(file_t) * max_open_files, DMVFS_ALLOCATOR_NAME);
     if (g_open_files == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for open files\n");
@@ -2389,7 +2389,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     }
 
     // Create a directory handle wrapper
-    dir_handle_t* dir_wrapper = (dir_handle_t*)Dmod_Malloc(sizeof(dir_handle_t));
+    dir_handle_t* dir_wrapper = (dir_handle_t*)Dmod_MallocEx(sizeof(dir_handle_t), DMVFS_ALLOCATOR_NAME);
     if (!dir_wrapper) {
         DMOD_LOG_ERROR("Failed to allocate directory handle wrapper\n");
         // Close the opened directory
