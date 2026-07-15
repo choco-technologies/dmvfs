@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 
 /**
  * @brief Open a file
@@ -289,6 +290,39 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, void, _FileClose, (void* File))
     {
         dmvfs_fclose(File);
     }
+}
+
+/**
+ * @brief Issue a driver-specific ioctl on a file
+ *
+ * DMOD_STDIN/OUT/ERR/LOG are virtual stream handles, not dmvfs file_t*
+ * pointers, so resolve them first exactly like Dmod_FileRead/Dmod_FileWrite
+ * do. If nothing is bound to the stream for the current process (raw kernel
+ * I/O fallback), there is no driver to forward the ioctl to.
+ *
+ * @param File File handle, or one of DMOD_STDIN/DMOD_STDOUT/DMOD_STDERR/DMOD_STDLOG
+ * @param Command Driver-specific ioctl command
+ * @param Arg Command-specific argument
+ * @return 0 on success, negative error code on failure
+ */
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _Ioctl, (void* File, int Command, void* Arg))
+{
+    if (File == NULL)
+    {
+        return -EINVAL;
+    }
+
+    void* resolvedFile = Dmod_LockStdio(File);
+    if (resolvedFile == NULL)
+    {
+        // Nothing bound (raw kernel I/O fallback) - no driver to forward to.
+        return -ENOTTY;
+    }
+
+    int result = dmvfs_ioctl(resolvedFile, Command, Arg);
+    Dmod_UnlockStdio(File);
+
+    return result;
 }
 
 /**
