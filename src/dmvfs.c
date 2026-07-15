@@ -8,12 +8,14 @@ typedef struct {
     Dmod_Context_t* fs_context;
     char* mount_point;
     dmfsi_context_t mount_context;
+    volatile int ref_count;    /**< In-flight operations referencing this mount point (see mount_point_acquire/release) */
 } mount_point_t;
 
 typedef struct {
     mount_point_t* mount_point;
     void* fs_file;
     int pid;
+    volatile int busy_count;   /**< In-flight operations using this file handle (see file_acquire/release) */
 } file_t;
 
 /**
@@ -91,10 +93,71 @@ static inline void unlock_mutex(void)
             Dmod_ExitCritical();
         }
     }
-    else 
+    else
     {
         Dmod_ExitCritical();
     }
+}
+
+/**
+ * @brief Mark a mount point as referenced by an in-flight operation
+ *
+ * Must be called while g_mutex is held (right after resolving the mount
+ * point and before releasing the lock to call into the underlying
+ * filesystem driver). Pairs with mount_point_release().
+ *
+ * This keeps the mount point alive/stable across a driver call that runs
+ * without g_mutex held: _unmount_fs() refuses to tear a mount point down
+ * while its ref_count is non-zero.
+ */
+static inline void mount_point_acquire(mount_point_t* mp)
+{
+    mp->ref_count++;
+}
+
+/**
+ * @brief Release a reference taken with mount_point_acquire()
+ *
+ * Locks g_mutex internally - call this standalone, after the (unlocked)
+ * driver call has returned.
+ */
+static inline void mount_point_release(mount_point_t* mp)
+{
+    lock_mutex();
+    if (mp->ref_count > 0)
+    {
+        mp->ref_count--;
+    }
+    unlock_mutex();
+}
+
+/**
+ * @brief Mark a file handle as in-use by an in-flight operation
+ *
+ * Must be called while g_mutex is held. Pairs with file_release().
+ * _fclose() refuses to close a file handle while its busy_count is
+ * non-zero, which prevents another task's read/write from being left
+ * holding a freed/reused file_t slot.
+ */
+static inline void file_acquire(file_t* file_entry)
+{
+    file_entry->busy_count++;
+}
+
+/**
+ * @brief Release a reference taken with file_acquire()
+ *
+ * Locks g_mutex internally - call this standalone, after the (unlocked)
+ * driver call has returned.
+ */
+static inline void file_release(file_t* file_entry)
+{
+    lock_mutex();
+    if (file_entry->busy_count > 0)
+    {
+        file_entry->busy_count--;
+    }
+    unlock_mutex();
 }
 
 /**
@@ -711,6 +774,13 @@ static bool remove_mount_point(const char* mount_point)
         return false;
     }
 
+    if(mp_entry->ref_count > 0)
+    {
+        DMOD_LOG_ERROR("Mount point '%s' is busy (%d in-flight operation(s)), cannot unmount\n",
+            mount_point, mp_entry->ref_count);
+        return false;
+    }
+
     dmod_dmfsi_deinit_t deinit_func = (dmod_dmfsi_deinit_t)Dmod_GetDifFunction(mp_entry->fs_context, dmod_dmfsi_deinit_sig);
     if(deinit_func != NULL)
     {
@@ -1076,15 +1146,29 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
         return -1;
     }
 
-    void* fs_file = NULL;
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = fopen_func(mp_entry->mount_context, &fs_file, fs_path, mode, attr);
+    mount_point_acquire(mp_entry);
+    unlock_mutex();
+
+    /* Unlocked: opening a file can block (e.g. a device driver waiting for
+     * hardware to become ready) and must not hold up every other task's
+     * file I/O while it does. mount_point_acquire() keeps mp_entry alive
+     * against a concurrent _unmount_fs() of the same mount point. */
+    void* fs_file = NULL;
+    int result = fopen_func(mount_context, &fs_file, fs_path, mode, attr);
     Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (fs_file == NULL || result != 0)
     {
         DMOD_LOG_ERROR("Failed to open file '%s'\n", path);
-        unlock_mutex();
+        return -1;
+    }
+
+    if (!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return -1;
     }
 
@@ -1099,6 +1183,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
     free_entry->mount_point = mp_entry;
     free_entry->fs_file = fs_file;
     free_entry->pid = pid;
+    free_entry->busy_count = 0;
     *fp = free_entry;
 
     unlock_mutex();
@@ -1146,6 +1231,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
+    if (file_entry->busy_count > 0)
+    {
+        DMOD_LOG_ERROR("File is in use by another operation, cannot close\n");
+        unlock_mutex();
+        return -1;
+    }
+
     dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(
         file_entry->mount_point->fs_context, dmod_dmfsi_fclose_sig);
 
@@ -1158,19 +1250,22 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
-    if (fclose_func(file_entry->mount_point->mount_context, file_entry->fs_file) != 0)
+    /* Clear the slot before releasing the lock so no new operation can be
+     * pinned (via file_acquire()) against this fp once we let go of the
+     * driver's fclose_func() - which, like the read/write path, must not
+     * run while holding the global DMVFS mutex. */
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_entry->mount_point = NULL;
+    file_entry->fs_file = NULL;
+    unlock_mutex();
+
+    if (fclose_func(mount_context, fs_file) != 0)
     {
         DMOD_LOG_ERROR("Failed to close file\n");
-        file_entry->mount_point = NULL;
-        file_entry->fs_file = NULL;
-        unlock_mutex();
         return -1;
     }
 
-    file_entry->mount_point = NULL;
-    file_entry->fs_file = NULL;
-
-    unlock_mutex();
     DMOD_LOG_INFO("File closed successfully\n");
     return 0;
 }
@@ -1194,37 +1289,51 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
         return -1;
     }
 
-    if (!lock_mutex())
-    {
-        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        return -1;
-    }
-
     bool success = true;
 
+    /* Close matching files one at a time, each under its own short lock,
+     * so fclose_func() (which may block) never runs while g_mutex is held -
+     * same reasoning as _fclose(). Entries currently pinned by an in-flight
+     * read/write (busy_count > 0) are skipped, same as a direct _fclose()
+     * would refuse them. */
     for (int i = 0; i < g_max_open_files; i++)
     {
-        if (g_open_files[i].pid == pid && g_open_files[i].mount_point != NULL)
+        if (!lock_mutex())
         {
-            dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(
-                g_open_files[i].mount_point->fs_context, dmod_dmfsi_fclose_sig);
+            DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+            return -1;
+        }
 
-            if (fclose_func != NULL)
-            {
-                if (fclose_func(g_open_files[i].mount_point->mount_context, g_open_files[i].fs_file) != 0)
-                {
-                    DMOD_LOG_ERROR("Failed to close file for process ID %d\n", pid);
-                    success = false;
-                }
-            }
+        if (g_open_files[i].pid != pid || g_open_files[i].mount_point == NULL)
+        {
+            unlock_mutex();
+            continue;
+        }
 
-            g_open_files[i].mount_point = NULL;
-            g_open_files[i].fs_file = NULL;
-            g_open_files[i].pid = 0;
+        if (g_open_files[i].busy_count > 0)
+        {
+            DMOD_LOG_WARN("File for process ID %d is in use, skipping close\n", pid);
+            unlock_mutex();
+            success = false;
+            continue;
+        }
+
+        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(
+            g_open_files[i].mount_point->fs_context, dmod_dmfsi_fclose_sig);
+        dmfsi_context_t mount_context = g_open_files[i].mount_point->mount_context;
+        void* fs_file = g_open_files[i].fs_file;
+
+        g_open_files[i].mount_point = NULL;
+        g_open_files[i].fs_file = NULL;
+        g_open_files[i].pid = 0;
+        unlock_mutex();
+
+        if (fclose_func != NULL && fclose_func(mount_context, fs_file) != 0)
+        {
+            DMOD_LOG_ERROR("Failed to close file for process ID %d\n", pid);
+            success = false;
         }
     }
-
-    unlock_mutex();
 
     if (success)
     {
@@ -1291,14 +1400,26 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fread, (void* fp, void* buf, size_t
         return -1;
     }
 
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
+    unlock_mutex();
+
+    /* Deliberately unlocked: fread_func() may legitimately block for a long
+     * time (e.g. waiting for UART RX data), and it must not hold the global
+     * DMVFS mutex while doing so - otherwise every other task's file I/O
+     * freezes for as long as this call blocks. file_acquire()/file_release()
+     * keep this file_t slot pinned so a concurrent _fclose() cannot free it
+     * out from under us. */
     size_t bytes_read = 0;
-    int result = fread_func(file_entry->mount_point->mount_context, file_entry->fs_file, buf, size, &bytes_read);
+    int result = fread_func(mount_context, fs_file, buf, size, &bytes_read);
+
+    file_release(file_entry);
 
     if (read_bytes)
     {
         *read_bytes = bytes_read;
     }
-    unlock_mutex();
 
     if (result != 0)
     {
@@ -1363,15 +1484,23 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fwrite, (void* fp, const void* buf,
         return -1;
     }
 
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
+    unlock_mutex();
+
+    /* Unlocked for the same reason as _fread() above - a write can block
+     * (e.g. a full TX ring waiting for space) and must not hold up every
+     * other file operation in the system while it does. */
     size_t bytes_written = 0;
-    int result = fwrite_func(file_entry->mount_point->mount_context, file_entry->fs_file, buf, size, &bytes_written);
+    int result = fwrite_func(mount_context, fs_file, buf, size, &bytes_written);
+
+    file_release(file_entry);
 
     if (written_bytes)
     {
         *written_bytes = bytes_written;
     }
-
-    unlock_mutex();
 
     if (result != 0)
     {
@@ -1425,7 +1554,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _lseek, (void* fp, long offset, int 
 
     dmod_dmfsi_lseek_t lseek_func = (dmod_dmfsi_lseek_t)Dmod_GetDifFunction(
         file_entry->mount_point->fs_context, dmod_dmfsi_lseek_sig);
-    
+
     if (lseek_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support lseek\n");
@@ -1433,8 +1562,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _lseek, (void* fp, long offset, int 
         return -1;
     }
 
-    int result = lseek_func(file_entry->mount_point->mount_context, file_entry->fs_file, offset, whence);
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = lseek_func(mount_context, fs_file, offset, whence);
+
+    file_release(file_entry);
 
     if (result < 0)
     {
@@ -1489,9 +1624,16 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, long, _ftell, (void* fp))
         unlock_mutex();
         return -1;
     }
-    long result = ftell_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
-    
+
+    long result = ftell_func(mount_context, fs_file);
+
+    file_release(file_entry);
+
     if (result < 0)
     {
         DMOD_LOG_ERROR("Failed to get file position\n");
@@ -1536,7 +1678,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _feof, (void* fp))
 
     dmod_dmfsi_eof_t feof_func = (dmod_dmfsi_eof_t)Dmod_GetDifFunction(
         file_entry->mount_point->fs_context, dmod_dmfsi_eof_sig);
-    
+
     if (feof_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support feof\n");
@@ -1544,8 +1686,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _feof, (void* fp))
         return -1;
     }
 
-    int result = feof_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = feof_func(mount_context, fs_file);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1585,7 +1733,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fflush, (void* fp))
 
     dmod_dmfsi_fflush_t fflush_func = (dmod_dmfsi_fflush_t)Dmod_GetDifFunction(
         file_entry->mount_point->fs_context, dmod_dmfsi_fflush_sig);
-    
+
     if (fflush_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support fflush\n");
@@ -1593,8 +1741,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fflush, (void* fp))
         return -1;
     }
 
-    int result = fflush_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = fflush_func(mount_context, fs_file);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1634,7 +1788,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _error, (void* fp))
 
     dmod_dmfsi_error_t error_func = (dmod_dmfsi_error_t)Dmod_GetDifFunction(
         file_entry->mount_point->fs_context, dmod_dmfsi_error_sig);
-    
+
     if (error_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support error\n");
@@ -1642,8 +1796,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _error, (void* fp))
         return -1;
     }
 
-    int result = error_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = error_func(mount_context, fs_file);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1681,8 +1841,16 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _remove, (const char* path))
         mp_entry->fs_context, dmod_dmfsi_unlink_sig);
     int result = -1;
     if (remove_func) {
+        dmfsi_context_t mount_context = mp_entry->mount_context;
         const char* fs_path = get_fs_path(abs_path, mp_entry);
-        result = remove_func(mp_entry->mount_context, fs_path);
+        mount_point_acquire(mp_entry);
+        unlock_mutex();
+
+        result = remove_func(mount_context, fs_path);
+
+        Dmod_Free((void*)abs_path);
+        mount_point_release(mp_entry);
+        return result;
     }
     Dmod_Free((void*)abs_path);
     unlock_mutex();
@@ -1728,9 +1896,18 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rename, (const char* oldpath, const
         mp_entry->fs_context, dmod_dmfsi_rename_sig);
     int result = -1;
     if (rename_func) {
+        dmfsi_context_t mount_context = mp_entry->mount_context;
         const char* fs_path_old = get_fs_path(abs_old, mp_entry);
         const char* fs_path_new = get_fs_path(abs_new, mp_entry);
-        result = rename_func(mp_entry->mount_context, fs_path_old, fs_path_new);
+        mount_point_acquire(mp_entry);
+        unlock_mutex();
+
+        result = rename_func(mount_context, fs_path_old, fs_path_new);
+
+        Dmod_Free((void*)abs_old);
+        Dmod_Free((void*)abs_new);
+        mount_point_release(mp_entry);
+        return result;
     }
     Dmod_Free((void*)abs_old);
     Dmod_Free((void*)abs_new);
@@ -1770,8 +1947,15 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _ioctl, (void* fp, int command, void
         unlock_mutex();
         return -1;
     }
-    int result = ioctl_func(file_entry->mount_point->mount_context, file_entry->fs_file, command, arg);
+
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = ioctl_func(mount_context, fs_file, command, arg);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1805,8 +1989,15 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _sync, (void* fp))
         unlock_mutex();
         return -1;
     }
-    int result = sync_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = sync_func(mount_context, fs_file);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1845,8 +2036,16 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _stat, (const char* path, dmfsi_stat
         mp_entry->fs_context, dmod_dmfsi_stat_sig);
     int result = -1;
     if (stat_func) {
+        dmfsi_context_t mount_context = mp_entry->mount_context;
         const char* fs_path = get_fs_path(abs_path, mp_entry);
-        result = stat_func(mp_entry->mount_context, fs_path, stat);
+        mount_point_acquire(mp_entry);
+        unlock_mutex();
+
+        result = stat_func(mount_context, fs_path, stat);
+
+        Dmod_Free((void*)abs_path);
+        mount_point_release(mp_entry);
+        return result;
     }
     Dmod_Free((void*)abs_path);
     unlock_mutex();
@@ -1883,8 +2082,17 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _getc, (void* fp))
         unlock_mutex();
         return -1;
     }
-    int result = getc_func(file_entry->mount_point->mount_context, file_entry->fs_file);
+
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    /* Unlocked - getc() on a tty/UART-backed file can block waiting for a
+     * byte to arrive, same as _fread(). */
+    int result = getc_func(mount_context, fs_file);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1919,8 +2127,15 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _putc, (void* fp, int c))
         unlock_mutex();
         return -1;
     }
-    int result = putc_func(file_entry->mount_point->mount_context, file_entry->fs_file, c);
+
+    dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+    void* fs_file = file_entry->fs_file;
+    file_acquire(file_entry);
     unlock_mutex();
+
+    int result = putc_func(mount_context, fs_file, c);
+
+    file_release(file_entry);
     return result;
 }
 
@@ -1976,10 +2191,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chmod, (const char* path, int mode)
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = chmod_func(mp_entry->mount_context, fs_path, mode);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = chmod_func(mount_context, fs_path, mode);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (result != 0)
     {
@@ -2044,10 +2263,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _utime, (const char* path, uint32_t 
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = utime_func(mp_entry->mount_context, fs_path, atime, mtime);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = utime_func(mount_context, fs_path, atime, mtime);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (result != 0)
     {
@@ -2110,10 +2333,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _unlink, (const char* path))
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = unlink_func(mp_entry->mount_context, fs_path);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = unlink_func(mount_context, fs_path);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (result != 0)
     {
@@ -2177,10 +2404,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _mkdir, (const char* path, int mode)
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = mkdir_func(mp_entry->mount_context, fs_path, mode);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = mkdir_func(mount_context, fs_path, mode);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (result != 0)
     {
@@ -2242,10 +2473,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rmdir, (const char* path))
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = rmdir_func(mp_entry->mount_context, fs_path);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = rmdir_func(mount_context, fs_path);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     if (result != 0)
     {
@@ -2300,12 +2535,25 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chdir, (const char* path))
     dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)Dmod_GetDifFunction(
         mp_entry->fs_context, dmod_dmfsi_direxists_sig);
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    if (!direxists_func || !direxists_func(mp_entry->mount_context, fs_path))
+    mount_point_acquire(mp_entry);
+    unlock_mutex();
+
+    bool exists = direxists_func && direxists_func(mount_context, fs_path);
+    mount_point_release(mp_entry);
+
+    if (!exists)
     {
         DMOD_LOG_ERROR("Directory '%s' does not exist\n", abs_path);
         Dmod_Free((void*)abs_path);
-        unlock_mutex();
+        return -1;
+    }
+
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        Dmod_Free((void*)abs_path);
         return -1;
     }
 
@@ -2376,15 +2624,21 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
         return -1;
     }
 
-    void* dir_handle = NULL;
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = opendir_func(mp_entry->mount_context, &dir_handle, fs_path);
+    mount_point_acquire(mp_entry);
+    unlock_mutex();
+
+    /* Unlocked: opendir_func() invokes the mounted driver, which shouldn't
+     * need to hold up every other task's file I/O to do so. */
+    void* dir_handle = NULL;
+    int result = opendir_func(mount_context, &dir_handle, fs_path);
 
     if (result != 0 || dir_handle == NULL)
     {
         DMOD_LOG_VERBOSE("Failed to open directory '%s'\n", path);
         Dmod_Free((void*)abs_path);
-        unlock_mutex();
+        mount_point_release(mp_entry);
         return -1;
     }
 
@@ -2396,13 +2650,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
         dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
             mp_entry->fs_context, dmod_dmfsi_closedir_sig);
         if (closedir_func) {
-            closedir_func(mp_entry->mount_context, dir_handle);
+            closedir_func(mount_context, dir_handle);
         }
         Dmod_Free((void*)abs_path);
-        unlock_mutex();
+        mount_point_release(mp_entry);
         return -1;
     }
-    
+
     // Initialize the wrapper
     dir_wrapper->mount_point = mp_entry;
     dir_wrapper->fs_dir = dir_handle;
@@ -2410,27 +2664,42 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     dir_wrapper->fs_exhausted = false;
     dir_wrapper->mount_point_index = -1;
     dir_wrapper->pid = 0;
-    
+
     Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
+
+    if (!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
+            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        if (closedir_func) {
+            closedir_func(mount_context, dir_handle);
+        }
+        Dmod_Free(dir_wrapper->abs_path);
+        Dmod_Free(dir_wrapper);
+        return -1;
+    }
 
     // Find a free file entry to track this directory handle
     file_t* free_entry = find_free_file_entry();
     if (free_entry == NULL) {
         DMOD_LOG_ERROR("No free file entries available for directory\n");
+        unlock_mutex();
         // Cleanup
         dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
             mp_entry->fs_context, dmod_dmfsi_closedir_sig);
         if (closedir_func) {
-            closedir_func(mp_entry->mount_context, dir_handle);
+            closedir_func(mount_context, dir_handle);
         }
         Dmod_Free(dir_wrapper->abs_path);
         Dmod_Free(dir_wrapper);
-        unlock_mutex();
         return -1;
     }
     free_entry->mount_point = mp_entry;
     free_entry->fs_file = dir_wrapper;
-    free_entry->pid = 0; 
+    free_entry->pid = 0;
+    free_entry->busy_count = 0;
 
     *dp = free_entry;
     DMOD_LOG_INFO("Directory '%s' opened successfully\n", path);
@@ -2486,15 +2755,27 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
             return -1;
         }
 
-        int result = readdir_func(dir_entry->mount_point->mount_context, dir_wrapper->fs_dir, entry);
-        
+        dmfsi_context_t mount_context = dir_entry->mount_point->mount_context;
+        void* fs_dir = dir_wrapper->fs_dir;
+        file_acquire(dir_entry);
+        unlock_mutex();
+
+        int result = readdir_func(mount_context, fs_dir, entry);
+
+        file_release(dir_entry);
+
         if (result == 0)
         {
             // Successfully read an entry from the filesystem
-            unlock_mutex();
             return 0;
         }
-        
+
+        if(!lock_mutex())
+        {
+            DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+            return -1;
+        }
+
         // Filesystem has no more entries, mark as exhausted
         dir_wrapper->fs_exhausted = true;
         dir_wrapper->mount_point_index = 0; // Start injecting mount points
@@ -2564,6 +2845,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
         return -1;
     }
 
+    if (dir_entry->busy_count > 0)
+    {
+        DMOD_LOG_ERROR("Directory handle is in use by another operation, cannot close\n");
+        unlock_mutex();
+        return -1;
+    }
+
     // Get the directory wrapper
     dir_handle_t* dir_wrapper = (dir_handle_t*)dir_entry->fs_file;
 
@@ -2577,8 +2865,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
         return -1;
     }
 
+    // Clear the slot before releasing the lock, same reasoning as _fclose().
+    dmfsi_context_t mount_context = dir_entry->mount_point->mount_context;
+    dir_entry->mount_point = NULL;
+    dir_entry->fs_file = NULL;
+    unlock_mutex();
+
     // Close the underlying filesystem directory
-    int result = closedir_func(dir_entry->mount_point->mount_context, dir_wrapper->fs_dir);
+    int result = closedir_func(mount_context, dir_wrapper->fs_dir);
 
     // Free the wrapper resources even if close failed
     if (dir_wrapper->abs_path) {
@@ -2586,18 +2880,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
     }
     Dmod_Free(dir_wrapper);
 
-    dir_entry->mount_point = NULL;
-    dir_entry->fs_file = NULL;
-
     if (result != 0)
     {
         DMOD_LOG_ERROR("Failed to close directory in underlying filesystem\n");
-        unlock_mutex();
         return -1;
     }
 
     DMOD_LOG_INFO("Directory closed successfully\n");
-    unlock_mutex();
     return 0;
 }
 /**
@@ -2651,10 +2940,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _direxists, (const char* path))
         return -1;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
-    int result = direxists_func(mp_entry->mount_context, fs_path);
-    Dmod_Free((void*)abs_path);
+    mount_point_acquire(mp_entry);
     unlock_mutex();
+
+    int result = direxists_func(mount_context, fs_path);
+    Dmod_Free((void*)abs_path);
+    mount_point_release(mp_entry);
 
     return result;
 }
