@@ -1044,7 +1044,21 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
         return false;
     }
 
+    dmfsi_context_t mount_context = mp_entry->mount_context;
     unlock_mutex();
+
+    /* Unlocked: the mount is now fully registered, so this is the first
+     * point at which it's safe to tell the file system its own absolute
+     * mount path (which we already have in hand - mount_point, the same
+     * string the caller asked to mount at), so it can push that down to
+     * anything that was waiting on it (e.g. dmdevfs notifying its own
+     * drivers). */
+    dmod_dmfsi_mounted_t mounted_func = (dmod_dmfsi_mounted_t)Dmod_GetDifFunction(fs_context, dmod_dmfsi_mounted_sig);
+    if(mounted_func != NULL)
+    {
+        mounted_func(mount_context, mount_point);
+    }
+
     DMOD_LOG_INFO("File system '%s' mounted at '%s' successfully\n", fs_name, mount_point);
     return true;
 }
@@ -1083,63 +1097,6 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _unmount_fs, (const char* mount_poi
     unlock_mutex();
     DMOD_LOG_INFO("File system at mount point '%s' unmounted successfully\n", mount_point);
     return true;
-}
-
-/**
- * @brief Strong override of dmfsi_get_mount_path()'s weak default (see dmfsi.c)
- *
- * Called by a mounted file system (e.g. dmdevfs) to ask dmvfs for the
- * absolute path under which it is currently mounted, so that it can in turn
- * answer path queries from its own drivers (see dmdrvi_get_path()).
- */
-DMOD_INPUT_API_DECLARATION(dmfsi, 1.0, int, _get_mount_path, (dmfsi_context_t ctx, char* path_buffer, size_t buffer_size))
-{
-    if (!is_initialized())
-    {
-        DMOD_LOG_ERROR("DMVFS is not initialized\n");
-        return DMFSI_ERR_GENERAL;
-    }
-
-    if (ctx == NULL || path_buffer == NULL || buffer_size == 0)
-    {
-        DMOD_LOG_ERROR("Invalid arguments to dmfsi_get_mount_path\n");
-        return DMFSI_ERR_INVALID;
-    }
-
-    if (!lock_mutex())
-    {
-        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        return DMFSI_ERR_GENERAL;
-    }
-
-    mount_point_t* mp_entry = NULL;
-    for (int i = 0; i < g_max_mount_points; i++)
-    {
-        if (g_mount_points[i].mount_point != NULL && g_mount_points[i].mount_context == ctx)
-        {
-            mp_entry = &g_mount_points[i];
-            break;
-        }
-    }
-
-    if (mp_entry == NULL)
-    {
-        unlock_mutex();
-        DMOD_LOG_WARN("dmfsi_get_mount_path: context is not currently mounted\n");
-        return DMFSI_ERR_NOT_FOUND;
-    }
-
-    size_t mount_point_len = strlen(mp_entry->mount_point);
-    if (mount_point_len >= buffer_size)
-    {
-        unlock_mutex();
-        DMOD_LOG_ERROR("dmfsi_get_mount_path: path buffer too small\n");
-        return DMFSI_ERR_INVALID;
-    }
-
-    strcpy(path_buffer, mp_entry->mount_point);
-    unlock_mutex();
-    return DMFSI_OK;
 }
 
 /**
