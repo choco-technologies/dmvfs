@@ -1201,7 +1201,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
     *fp = free_entry;
 
     unlock_mutex();
-    DMOD_LOG_INFO("File '%s' opened successfully\n", path);
+    DMOD_LOG_VERBOSE("File '%s' opened successfully\n", path);
     return 0;
 }
 
@@ -1280,7 +1280,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
-    DMOD_LOG_INFO("File closed successfully\n");
+    DMOD_LOG_VERBOSE("File closed successfully\n");
     return 0;
 }
 
@@ -1351,7 +1351,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
 
     if (success)
     {
-        DMOD_LOG_INFO("All files for process ID %d closed successfully\n", pid);
+        DMOD_LOG_VERBOSE("All files for process ID %d closed successfully\n", pid);
         return 0;
     }
     else
@@ -2220,7 +2220,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chmod, (const char* path, int mode)
         return -1;
     }
 
-    DMOD_LOG_INFO("Permissions for '%s' changed successfully\n", path);
+    DMOD_LOG_VERBOSE("Permissions for '%s' changed successfully\n", path);
     return 0;
 }
 /**
@@ -2362,7 +2362,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _unlink, (const char* path))
         return -1;
     }
 
-    DMOD_LOG_INFO("File '%s' removed successfully\n", path);
+    DMOD_LOG_VERBOSE("File '%s' removed successfully\n", path);
     return 0;
 }
 
@@ -2433,7 +2433,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _mkdir, (const char* path, int mode)
         return -1;
     }
 
-    DMOD_LOG_INFO("Directory '%s' created successfully\n", path);
+    DMOD_LOG_VERBOSE("Directory '%s' created successfully\n", path);
     return 0;
 }
 /**
@@ -2502,7 +2502,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rmdir, (const char* path))
         return -1;
     }
 
-    DMOD_LOG_INFO("Directory '%s' removed successfully\n", path);
+    DMOD_LOG_VERBOSE("Directory '%s' removed successfully\n", path);
     return 0;
 }
 
@@ -2581,7 +2581,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chdir, (const char* path))
         return -1;
     }
 
-    DMOD_LOG_INFO("Current working directory changed to '%s'\n", g_cwd);
+    DMOD_LOG_VERBOSE("Current working directory changed to '%s'\n", g_cwd);
     unlock_mutex();
     return 0;
 }
@@ -2716,7 +2716,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     free_entry->busy_count = 0;
 
     *dp = free_entry;
-    DMOD_LOG_INFO("Directory '%s' opened successfully\n", path);
+    DMOD_LOG_VERBOSE("Directory '%s' opened successfully\n", path);
     unlock_mutex();
     return 0;
 }
@@ -2900,7 +2900,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
         return -1;
     }
 
-    DMOD_LOG_INFO("Directory closed successfully\n");
+    DMOD_LOG_VERBOSE("Directory closed successfully\n");
     return 0;
 }
 /**
@@ -3067,7 +3067,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _setpwd, (const char* path))
     }
 
     g_pwd = new_pwd;
-    DMOD_LOG_INFO("Process working directory set to '%s'\n", g_pwd);
+    DMOD_LOG_VERBOSE("Process working directory set to '%s'\n", g_pwd);
     unlock_mutex();
     return 0;
 }
