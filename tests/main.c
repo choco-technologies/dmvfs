@@ -569,7 +569,7 @@ bool test_dmlist_operations(void)
     TEST_START("DMLIST linked list operations");
     
     // Create a list
-    dmlist_context_t* list = dmlist_create("fs_tester");
+    dmlist_context_t* list = dmlist_create();
     if (list == NULL) {
         TEST_FAIL("Cannot create dmlist");
         return false;
