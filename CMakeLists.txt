@@ -70,6 +70,10 @@ add_library(dmvfs STATIC
     src/dmod_sal.c
 )
 
+# dmod_sal.h requires DMOD_CURRENT_ALLOCATOR to be defined on the system side -
+# see dmod's dmod_set_current_allocator() in scripts/CMakeLists.txt.
+dmod_set_current_allocator(dmvfs)
+
 target_include_directories(dmvfs PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>
 )
