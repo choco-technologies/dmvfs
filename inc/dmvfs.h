@@ -18,7 +18,7 @@ DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose, (void* fp) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose_process, (int pid) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fread, (void* fp, void* buf, size_t size, size_t* read_bytes) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fwrite, (void* fp, const void* buf, size_t size, size_t* written_bytes) );
-DMOD_BUILTIN_API( dmvfs, 2.0, int, _lseek, (void* fp, dmfsi_offset_t offset, int whence) );
+DMOD_BUILTIN_API( dmvfs, 2.0, dmfsi_offset_t, _lseek, (void* fp, dmfsi_offset_t offset, int whence) );
 DMOD_BUILTIN_API( dmvfs, 2.0, dmfsi_offset_t, _ftell, (void* fp) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _feof, (void* fp) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fflush, (void* fp) );

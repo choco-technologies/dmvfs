@@ -234,9 +234,9 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileOffset_t, _FileTell, (void* File)
         return 0;
     }
     
-    long pos = dmvfs_ftell(File);
+    dmfsi_offset_t pos = dmvfs_ftell(File);
     
-    return (pos >= 0) ? (size_t)pos : 0;
+    return (pos >= 0) ? (Dmod_FileOffset_t)pos : 0;
 }
 
 /**
