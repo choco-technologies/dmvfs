@@ -192,7 +192,7 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileWrite, (const void* Buffer, s
  * @param Origin Origin for seek (DMOD_SEEK_SET, DMOD_SEEK_CUR, DMOD_SEEK_END)
  * @return int 0 on success, non-zero on failure
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, long Offset, int Origin))
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, Dmod_FileOffset_t Offset, int Origin))
 {
     if (File == NULL)
     {
@@ -227,16 +227,16 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, long Offset, 
  * @param File File handle
  * @return size_t Current position, or 0 on error
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileTell, (void* File))
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileOffset_t, _FileTell, (void* File))
 {
     if (File == NULL)
     {
         return 0;
     }
     
-    long pos = dmvfs_ftell(File);
+    dmfsi_offset_t pos = dmvfs_ftell(File);
     
-    return (pos >= 0) ? (size_t)pos : 0;
+    return (pos >= 0) ? (Dmod_FileOffset_t)pos : 0;
 }
 
 /**
@@ -245,7 +245,7 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileTell, (void* File))
  * @param File File handle
  * @return size_t File size, or 0 on error
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileSize, (void* File))
+DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileSize_t, _FileSize, (void* File))
 {
     if (File == NULL)
     {

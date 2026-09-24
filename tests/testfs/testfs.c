@@ -59,7 +59,7 @@ void testfs_memmove(void* dest, const void* src, size_t num) {
 typedef struct {
     char name[TESTFS_MAX_FILENAME];
     char data[TESTFS_MAX_FILE_SIZE];
-    size_t size;
+    dmfsi_size_t size;
     int attr;
     int used;
 } testfs_file_t;
@@ -85,7 +85,7 @@ struct dmfsi_context {
 // File handle
 typedef struct {
     int file_index;
-    size_t pos;
+    dmfsi_offset_t pos;
     int open;
 } testfs_fp_t;
 
@@ -278,7 +278,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _fwrite, (dmfsi_context_t ctx,
     return DMFSI_OK;
 }
 
-dmod_dmfsi_dif_api_declaration( 1.0, testfs, long, _lseek, (dmfsi_context_t ctx, void* fp, long offset, int whence) )
+dmod_dmfsi_dif_api_declaration( 2.0, testfs, dmfsi_size_t, _lseek, (dmfsi_context_t ctx, void* fp, dmfsi_size_t offset, int whence) )
 {
     if (!ctx || !fp) return DMFSI_ERR_INVALID;
     testfs_fp_t* handle = (testfs_fp_t*)fp;
@@ -292,7 +292,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, long, _lseek, (dmfsi_context_t ctx,
     }
     if (new_pos > fs->files[handle->file_index].size) return DMFSI_ERR_INVALID;
     handle->pos = new_pos;
-    return (long)new_pos;
+    return (dmfsi_size_t)new_pos;
 }
 
 dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _ioctl, (dmfsi_context_t ctx, void* fp, int request, void* arg) )
@@ -326,11 +326,11 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _putc, (dmfsi_context_t ctx, v
     return c;
 }
 
-dmod_dmfsi_dif_api_declaration( 1.0, testfs, long, _tell, (dmfsi_context_t ctx, void* fp) )
+dmod_dmfsi_dif_api_declaration( 2.0, testfs, dmfsi_offset_t, _tell, (dmfsi_context_t ctx, void* fp) )
 {
     if (!ctx || !fp) return DMFSI_ERR_INVALID;
     testfs_fp_t* handle = (testfs_fp_t*)fp;
-    return (long)handle->pos;
+    return (dmfsi_offset_t)handle->pos;
 }
 
 dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _eof, (dmfsi_context_t ctx, void* fp) )
@@ -342,7 +342,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _eof, (dmfsi_context_t ctx, vo
     return 0;
 }
 
-dmod_dmfsi_dif_api_declaration( 1.0, testfs, long, _size, (dmfsi_context_t ctx, void* fp) )
+dmod_dmfsi_dif_api_declaration( 2.0, testfs, dmfsi_size_t, _size, (dmfsi_context_t ctx, void* fp) )
 {
     if (!ctx || !fp) return DMFSI_ERR_INVALID;
     testfs_fp_t* handle = (testfs_fp_t*)fp;
@@ -380,7 +380,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _opendir, (dmfsi_context_t ctx
 // Read directory entry
 // Returns DMFSI_OK and fills entry, DMFSI_ERR_NOT_FOUND at end
 
-dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _readdir, (dmfsi_context_t ctx, void* dp, dmfsi_dir_entry_t* entry) )
+dmod_dmfsi_dif_api_declaration( 2.0, testfs, int, _readdir, (dmfsi_context_t ctx, void* dp, dmfsi_dir_entry_t* entry) )
 {
     if (!ctx || !dp || !entry) return DMFSI_ERR_INVALID;
     testfs_dp_t* handle = (testfs_dp_t*)dp;
@@ -438,7 +438,7 @@ dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _direxists, (dmfsi_context_t c
     return 0;
 }
 
-dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _stat, (dmfsi_context_t ctx, const char* path, dmfsi_stat_t* stat) )
+dmod_dmfsi_dif_api_declaration( 2.0, testfs, int, _stat, (dmfsi_context_t ctx, const char* path, dmfsi_stat_t* stat) )
 {
     if (!ctx || !path || !stat) return DMFSI_ERR_INVALID;
     testfs_context_t* fs = &ctx->ramfs;

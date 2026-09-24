@@ -1538,7 +1538,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fwrite, (void* fp, const void* buf,
  *
  * @return New offset on success, -1 on failure
  */
-DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _lseek, (void* fp, long offset, int whence))
+DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _lseek, (void* fp, dmfsi_offset_t offset, int whence))
 {
     if (!is_initialized())
     {
@@ -1581,7 +1581,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _lseek, (void* fp, long offset, int 
     file_acquire(file_entry);
     unlock_mutex();
 
-    int result = lseek_func(mount_context, fs_file, offset, whence);
+    dmfsi_offset_t result = lseek_func(mount_context, fs_file, offset, whence);
 
     file_release(file_entry);
 
@@ -1604,7 +1604,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _lseek, (void* fp, long offset, int 
  *
  * @return Current offset on success, -1 on failure
  */
-DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, long, _ftell, (void* fp))
+DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _ftell, (void* fp))
 {
     if (!is_initialized())
     {
@@ -1644,7 +1644,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, long, _ftell, (void* fp))
     file_acquire(file_entry);
     unlock_mutex();
 
-    long result = ftell_func(mount_context, fs_file);
+    dmfsi_offset_t result = ftell_func(mount_context, fs_file);
 
     file_release(file_entry);
 
