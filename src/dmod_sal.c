@@ -192,13 +192,13 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, size_t, _FileWrite, (const void* Buffer, s
  * @param Origin Origin for seek (DMOD_SEEK_SET, DMOD_SEEK_CUR, DMOD_SEEK_END)
  * @return int 0 on success, non-zero on failure
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, Dmod_FileOffset_t Offset, int Origin))
+DMOD_INPUT_API_DECLARATION(Dmod, 2.0, int, _FileSeek, (void* File, Dmod_FileOffset_t Offset, int Origin))
 {
     if (File == NULL)
     {
         return -1;
     }
-    
+
     // Map DMOD_SEEK_* to DMFSI_SEEK_*
     int whence;
     switch (Origin)
@@ -215,9 +215,9 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, Dmod_FileOffs
         default:
             return -1;
     }
-    
-    int result = dmvfs_lseek(File, Offset, whence);
-    
+
+    dmfsi_offset_t result = dmvfs_lseek(File, Offset, whence);
+
     return (result >= 0) ? 0 : -1;
 }
 
@@ -227,7 +227,7 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, int, _FileSeek, (void* File, Dmod_FileOffs
  * @param File File handle
  * @return size_t Current position, or 0 on error
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileOffset_t, _FileTell, (void* File))
+DMOD_INPUT_API_DECLARATION(Dmod, 2.0, Dmod_FileOffset_t, _FileTell, (void* File))
 {
     if (File == NULL)
     {
@@ -245,29 +245,29 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileOffset_t, _FileTell, (void* File)
  * @param File File handle
  * @return size_t File size, or 0 on error
  */
-DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileSize_t, _FileSize, (void* File))
+DMOD_INPUT_API_DECLARATION(Dmod, 2.0, Dmod_FileSize_t, _FileSize, (void* File))
 {
     if (File == NULL)
     {
         return 0;
     }
-    
+
     // Save current position
-    long current_pos = dmvfs_ftell(File);
+    dmfsi_offset_t current_pos = dmvfs_ftell(File);
     if (current_pos < 0)
     {
         return 0;
     }
-    
+
     // Seek to end
     if (dmvfs_lseek(File, 0, DMFSI_SEEK_END) < 0)
     {
         return 0;
     }
-    
+
     // Get position (which is the file size)
-    long size = dmvfs_ftell(File);
-    
+    dmfsi_offset_t size = dmvfs_ftell(File);
+
     // Restore original position - if this fails, we have a problem
     // but we should still return the size we got
     if (dmvfs_lseek(File, current_pos, DMFSI_SEEK_SET) < 0)
@@ -275,8 +275,35 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, Dmod_FileSize_t, _FileSize, (void* File))
         // Log the issue but still return the size
         DMOD_LOG_WARN("Failed to restore file position after getting size\n");
     }
-    
-    return (size >= 0) ? (size_t)size : 0;
+
+    return (size >= 0) ? (Dmod_FileSize_t)size : 0;
+}
+
+/**
+ * @brief Get metadata for a file without opening it
+ *
+ * @param Path Path to the file
+ * @param Stat Pointer to store the resulting metadata
+ * @return int 0 on success, non-zero on failure
+ */
+DMOD_INPUT_API_DECLARATION(Dmod, 2.0, int, _FileStat, (const char* Path, Dmod_FileStat_t* Stat))
+{
+    if (Path == NULL || Stat == NULL)
+    {
+        return -1;
+    }
+
+    dmfsi_stat_t stat;
+    int ret = dmvfs_stat(Path, &stat);
+    if (ret != 0)
+    {
+        return -1;
+    }
+
+    Stat->Size = stat.size;
+    Stat->Mode = stat.attr;
+
+    return 0;
 }
 
 /**

@@ -2022,7 +2022,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _sync, (void* fp))
  * @param stat Pointer to stat structure to fill
  * @return 0 on success, -1 on error
  */
-DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _stat, (const char* path, dmfsi_stat_t* stat))
+DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, int, _stat, (const char* path, dmfsi_stat_t* stat))
 {
     if (!is_initialized() || path == NULL || stat == NULL)
         return -1;
