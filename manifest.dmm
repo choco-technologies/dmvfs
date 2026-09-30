@@ -1,0 +1,7 @@
+# Include dynamically generated versions list from latest release
+$include https://github.com/choco-technologies/dmvfs/releases/download/vlatest/versions.dmm
+
+# Module entries with version placeholder - will be expanded by $version-available
+# dmvfs ships a precompiled static library alongside its header, so it is
+# architecture-dependent like the other system modules (see dmosi, dmheap)
+dmvfs https://github.com/choco-technologies/dmvfs/releases/download/v<version>/dmvfs-v<version>-<arch_name>.zip

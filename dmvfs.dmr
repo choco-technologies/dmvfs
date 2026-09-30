@@ -1,0 +1,25 @@
+# DMOD Resource File for dmvfs
+# This file specifies where resources should be installed
+# Note: dmvfs is built into the firmware, so no .dmf file is distributed -
+# modules only need its header (dmod_link_modules(<target> dmvfs)) to call
+# its DMOD_BUILTIN_API functions. dmvfs.h includes dmfsi.h: link dmfsi too.
+
+# === Header Files ===
+# Include directory with dmvfs.h header
+inc=./include => ${destination}/${module}/include
+
+# === Static Library ===
+# Precompiled static library (architecture-specific build)
+lib=./lib/libdmvfs.a => ${destination}/${module}/lib/libdmvfs.a
+
+# === Documentation ===
+# README file
+readme=./README.md => ${destination}/${module}/README.md
+
+# === License ===
+# License file
+license=./LICENSE => ${destination}/${module}/LICENSE
+
+# Adding itself - dmf-get reads the installed <module>/<module>.dmr (e.g. when
+# looking for a module's configuration files)
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr

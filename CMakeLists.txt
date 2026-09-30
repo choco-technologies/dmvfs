@@ -4,15 +4,6 @@
 cmake_minimum_required(VERSION 3.10)
 
 # ======================================================================
-#               DMOD VFS
-# ======================================================================
-project(dmvfs 
-    VERSION 1.0
-    DESCRIPTION "DMOD Virtual File System"
-    LANGUAGES C CXX)
-
-
-# ======================================================================
 #               Fetch DMOD repository
 # ======================================================================
 include(FetchContent)
@@ -46,6 +37,19 @@ else()
     message(STATUS "dmod target already exists, skipping FetchContent")
 endif()
 
+include(${DMOD_DIR}/paths.cmake)
+
+# ======================================================================
+#               DMOD VFS
+# ======================================================================
+# DMOD must configure the architecture-specific compilers before this project
+# enables C/CXX. Otherwise CMake locks in the host compiler and release
+# artifacts are built for the host whatever DMOD_TOOLS_NAME selects.
+project(dmvfs
+    VERSION 1.0
+    DESCRIPTION "DMOD Virtual File System"
+    LANGUAGES C CXX)
+
 # ======================================================================
 #               Fetch DMOD File System Interface
 # ======================================================================
@@ -63,6 +67,19 @@ set(DMOD_DIR ${dmod_SOURCE_DIR})
 FetchContent_MakeAvailable(dmfsi)
 
 # ======================================================================
+#               DMOD VFS Interface Library
+# ======================================================================
+# Header-only target for code that just calls dmvfs's DMOD_BUILTIN_API
+# functions (resolved at runtime against the firmware's own dmvfs) without
+# linking a second copy of dmvfs. Modules in other repositories get the same
+# headers from the release package with dmod_link_modules(<target> dmvfs).
+add_library(dmvfs_if INTERFACE)
+target_include_directories(dmvfs_if
+    INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc
+)
+
+# ======================================================================
 #               DMOD VFS Library definition
 # ======================================================================
 add_library(dmvfs STATIC
@@ -78,9 +95,16 @@ target_include_directories(dmvfs PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>
 )
 
+# Only the headers of dmod and dmfsi: dmvfs registers the dmfsi DIF
+# signatures itself, and whoever links dmvfs into a binary links dmod too.
+# Linking the dmod/dmfsi libraries here would make every build of dmvfs -
+# e.g. the release packages - also build dmod's system library, which does
+# not compile on every dmod-supported toolchain (xtensa/esp32s3).
 target_link_libraries(dmvfs PUBLIC
-    dmod
-    dmfsi
+    dmod_inc
+)
+target_include_directories(dmvfs PUBLIC
+    $<TARGET_PROPERTY:dmfsi,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 if(DMVFS_BUILD_TESTS)
