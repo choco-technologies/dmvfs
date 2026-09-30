@@ -19,3 +19,7 @@ readme=./README.md => ${destination}/${module}/README.md
 # === License ===
 # License file
 license=./LICENSE => ${destination}/${module}/LICENSE
+
+# Adding itself - dmf-get reads the installed <module>/<module>.dmr (e.g. when
+# looking for a module's configuration files)
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr
