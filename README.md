@@ -207,6 +207,44 @@ int main(void) {
 
 For complete API documentation, see `inc/dmvfs.h`.
 
+### Using dmvfs from other code
+
+dmvfs is built into the firmware (dmod-boot links it as a static library);
+it is never a loadable `.dmf` module. Its functions are `DMOD_BUILTIN_API`,
+so a module calls them like the rest of the built-in API. Each release
+publishes a package per architecture with `dmvfs.h` and a precompiled
+`libdmvfs.a`, listed in `manifest.dmm`:
+
+- **A DMOD module** that calls dmvfs (e.g. a `mount` command) only needs the
+  header. `dmvfs.h` includes `dmfsi.h`, so link dmfsi as well:
+
+  ```cmake
+  dmod_link_modules(${DMOD_MODULE_NAME}
+      dmvfs
+      dmfsi
+  )
+  ```
+
+- **A system-side binary** (a loader, a host tool or test) links the library
+  itself, which also makes its Built-in API available to the modules it
+  loads:
+
+  ```cmake
+  dmod_link_builtin(${PROJECT_NAME}
+      dmvfs
+  )
+  dmod_link_modules(${PROJECT_NAME}
+      dmfsi
+  )
+  ```
+
+  `libdmvfs.a` implements the DMOD SAL file API on top of dmvfs, so the
+  binary has to call `dmvfs_init()` and mount a file system before its
+  modules use files.
+
+In this repository the `dmvfs_if` target provides the same header without
+linking the library.
+
 ## Testing
 
 DMVFS includes a comprehensive test suite that validates file system implementations.
