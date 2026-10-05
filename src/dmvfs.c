@@ -4,10 +4,57 @@
 #include <stdbool.h>
 #include <errno.h>
 
+/**
+ * @brief File system interface functions cached per mount point (see get_fs_function)
+ */
+typedef enum {
+    FS_OP_FOPEN,
+    FS_OP_FCLOSE,
+    FS_OP_FREAD,
+    FS_OP_FWRITE,
+    FS_OP_LSEEK,
+    FS_OP_TELL,
+    FS_OP_EOF,
+    FS_OP_FFLUSH,
+    FS_OP_ERROR,
+    FS_OP_IOCTL,
+    FS_OP_SYNC,
+    FS_OP_GETC,
+    FS_OP_PUTC,
+    FS_OP_STAT,
+    FS_OP_CHMOD,
+    FS_OP_UTIME,
+    FS_OP_UNLINK,
+    FS_OP_RENAME,
+    FS_OP_MKDIR,
+    FS_OP_DIREXISTS,
+    FS_OP_OPENDIR,
+    FS_OP_READDIR,
+    FS_OP_CLOSEDIR,
+    FS_OP_DEINIT,
+
+    FS_OP_COUNT
+} fs_op_t;
+
+/**
+ * @brief Cache of the file system module's DIF functions
+ *
+ * Resolving a DIF function (Dmod_GetDifFunction) compares the signatures of
+ * the module's inputs one by one - thousands of instructions per lookup, paid
+ * on every getc/fread/... call. The cache keeps each function once it has
+ * been resolved, and the module identity it was resolved from, so a cached
+ * pointer is never called once the module is gone (see is_fs_module_alive).
+ */
+typedef struct {
+    const char* fs_identity;            /**< Dmod_GetName() of the module when the cache was created */
+    void* functions[FS_OP_COUNT];       /**< Resolved functions, NULL until first used */
+} fs_cache_t;
+
 typedef struct {
     Dmod_Context_t* fs_context;
     char* mount_point;
     dmfsi_context_t mount_context;
+    fs_cache_t* fs_cache;      /**< Cached DIF functions of fs_context (see get_fs_function) */
     volatile int ref_count;    /**< In-flight operations referencing this mount point (see mount_point_acquire/release) */
 } mount_point_t;
 
@@ -37,6 +84,33 @@ static void* g_mutex = NULL;
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
 static file_t* g_open_files = NULL;
+
+static const char* const* const g_fs_op_signatures[FS_OP_COUNT] = {
+    [FS_OP_FOPEN]     = &dmod_dmfsi_fopen_sig,
+    [FS_OP_FCLOSE]    = &dmod_dmfsi_fclose_sig,
+    [FS_OP_FREAD]     = &dmod_dmfsi_fread_sig,
+    [FS_OP_FWRITE]    = &dmod_dmfsi_fwrite_sig,
+    [FS_OP_LSEEK]     = &dmod_dmfsi_lseek_sig,
+    [FS_OP_TELL]      = &dmod_dmfsi_tell_sig,
+    [FS_OP_EOF]       = &dmod_dmfsi_eof_sig,
+    [FS_OP_FFLUSH]    = &dmod_dmfsi_fflush_sig,
+    [FS_OP_ERROR]     = &dmod_dmfsi_error_sig,
+    [FS_OP_IOCTL]     = &dmod_dmfsi_ioctl_sig,
+    [FS_OP_SYNC]      = &dmod_dmfsi_sync_sig,
+    [FS_OP_GETC]      = &dmod_dmfsi_getc_sig,
+    [FS_OP_PUTC]      = &dmod_dmfsi_putc_sig,
+    [FS_OP_STAT]      = &dmod_dmfsi_stat_sig,
+    [FS_OP_CHMOD]     = &dmod_dmfsi_chmod_sig,
+    [FS_OP_UTIME]     = &dmod_dmfsi_utime_sig,
+    [FS_OP_UNLINK]    = &dmod_dmfsi_unlink_sig,
+    [FS_OP_RENAME]    = &dmod_dmfsi_rename_sig,
+    [FS_OP_MKDIR]     = &dmod_dmfsi_mkdir_sig,
+    [FS_OP_DIREXISTS] = &dmod_dmfsi_direxists_sig,
+    [FS_OP_OPENDIR]   = &dmod_dmfsi_opendir_sig,
+    [FS_OP_READDIR]   = &dmod_dmfsi_readdir_sig,
+    [FS_OP_CLOSEDIR]  = &dmod_dmfsi_closedir_sig,
+    [FS_OP_DEINIT]    = &dmod_dmfsi_deinit_sig,
+};
 
 /**
  * @brief Check if DMVFS is initialized
@@ -129,6 +203,75 @@ static inline void mount_point_release(mount_point_t* mp)
         mp->ref_count--;
     }
     unlock_mutex();
+}
+
+/**
+ * @brief Check that the file system module of a mount point is still loaded
+ *
+ * The module may have been unloaded (forcibly, or after a crash of the module)
+ * since its functions were cached. Dmod_IsEnabled/Dmod_IsRunning verify the
+ * context signature (cleared when the context is deleted), and the module name
+ * pointer - which points into the loaded module image - tells a context reused
+ * by another loaded module apart from the one the cache was created for.
+ *
+ * @param mp Mount point entry
+ * @return true if the cached functions of the mount point can be called
+ */
+static bool is_fs_module_alive(const mount_point_t* mp)
+{
+    if(!Dmod_IsEnabled(mp->fs_context) && !Dmod_IsRunning(mp->fs_context))
+    {
+        return false;
+    }
+    return Dmod_GetName(mp->fs_context) == mp->fs_cache->fs_identity;
+}
+
+/**
+ * @brief Get a DIF function of the file system module of a mount point
+ *
+ * The function is resolved once per mount point and cached, but every call
+ * first checks that the module is still loaded (see is_fs_module_alive).
+ *
+ * @param mp Mount point entry
+ * @param op File system operation
+ * @return Function pointer, or NULL if the module is gone or does not implement it
+ */
+static void* get_fs_function(mount_point_t* mp, fs_op_t op)
+{
+    if(mp == NULL || mp->fs_cache == NULL || op >= FS_OP_COUNT)
+    {
+        return NULL;
+    }
+
+    if(!is_fs_module_alive(mp))
+    {
+        DMOD_LOG_ERROR("File system module of mount point '%s' is no longer loaded\n", mp->mount_point);
+        return NULL;
+    }
+
+    if(mp->fs_cache->functions[op] == NULL)
+    {
+        mp->fs_cache->functions[op] = Dmod_GetDifFunction(mp->fs_context, *g_fs_op_signatures[op]);
+    }
+    return mp->fs_cache->functions[op];
+}
+
+/**
+ * @brief Create the DIF function cache of a mount point
+ *
+ * @param fs_context File system module context
+ * @return New cache, or NULL on allocation failure
+ */
+static fs_cache_t* create_fs_cache(Dmod_Context_t* fs_context)
+{
+    fs_cache_t* cache = (fs_cache_t*)Dmod_Malloc(sizeof(fs_cache_t));
+    if(cache == NULL)
+    {
+        return NULL;
+    }
+    memset(cache, 0, sizeof(fs_cache_t));
+    cache->fs_identity = Dmod_GetName(fs_context);
+    return cache;
 }
 
 /**
@@ -619,7 +762,7 @@ static bool close_all_file_of_mount_point(mount_point_t* mp_entry)
     {
         if(g_open_files[i].mount_point == mp_entry)
         {
-            dmod_dmfsi_fclose_t close_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(mp_entry->fs_context, dmod_dmfsi_fclose_sig);
+            dmod_dmfsi_fclose_t close_func = (dmod_dmfsi_fclose_t)get_fs_function(mp_entry, FS_OP_FCLOSE);
             if(close_func != NULL)
             {
                 if(close_func(mp_entry->mount_context, g_open_files[i].fs_file) != 0)
@@ -750,6 +893,14 @@ static mount_point_t* add_mount_point(const char* mount_point, Dmod_Context_t* f
 
 
     strcpy(free_entry->mount_point, mount_point);
+    free_entry->fs_cache = create_fs_cache(fs_context);
+    if(free_entry->fs_cache == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for mount point '%s'\n", mount_point);
+        Dmod_Free(free_entry->mount_point);
+        free_entry->mount_point = NULL;
+        return NULL;
+    }
     free_entry->fs_context = fs_context;
     return free_entry;
 }
@@ -781,7 +932,7 @@ static bool remove_mount_point(const char* mount_point)
         return false;
     }
 
-    dmod_dmfsi_deinit_t deinit_func = (dmod_dmfsi_deinit_t)Dmod_GetDifFunction(mp_entry->fs_context, dmod_dmfsi_deinit_sig);
+    dmod_dmfsi_deinit_t deinit_func = (dmod_dmfsi_deinit_t)get_fs_function(mp_entry, FS_OP_DEINIT);
     if(deinit_func != NULL)
     {
         int result = deinit_func(mp_entry->mount_context);
@@ -801,8 +952,10 @@ static bool remove_mount_point(const char* mount_point)
     Dmod_EndUsage(module_name);
 
     Dmod_Free(mp_entry->mount_point);
+    Dmod_Free(mp_entry->fs_cache);
     mp_entry->mount_point = NULL;
     mp_entry->mount_context = NULL;
+    mp_entry->fs_cache = NULL;
     mp_entry->fs_context = NULL;
     return true;
 }
@@ -1151,7 +1304,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
         return -1;
     }
 
-    dmod_dmfsi_fopen_t fopen_func = (dmod_dmfsi_fopen_t)Dmod_GetDifFunction(mp_entry->fs_context, dmod_dmfsi_fopen_sig);
+    dmod_dmfsi_fopen_t fopen_func = (dmod_dmfsi_fopen_t)get_fs_function(mp_entry, FS_OP_FOPEN);
     if (fopen_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support fopen for path '%s'\n", abs_path);
@@ -1252,8 +1405,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
-    dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_fclose_sig);
+    dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(file_entry->mount_point, FS_OP_FCLOSE);
 
     if (fclose_func == NULL)
     {
@@ -1332,8 +1484,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
             continue;
         }
 
-        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)Dmod_GetDifFunction(
-            g_open_files[i].mount_point->fs_context, dmod_dmfsi_fclose_sig);
+        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(g_open_files[i].mount_point, FS_OP_FCLOSE);
         dmfsi_context_t mount_context = g_open_files[i].mount_point->mount_context;
         void* fs_file = g_open_files[i].fs_file;
 
@@ -1404,8 +1555,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fread, (void* fp, void* buf, size_t
         return -1;
     }
 
-    dmod_dmfsi_fread_t fread_func = (dmod_dmfsi_fread_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_fread_sig);
+    dmod_dmfsi_fread_t fread_func = (dmod_dmfsi_fread_t)get_fs_function(file_entry->mount_point, FS_OP_FREAD);
 
     if (fread_func == NULL)
     {
@@ -1488,8 +1638,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fwrite, (void* fp, const void* buf,
         return -1;
     }
 
-    dmod_dmfsi_fwrite_t fwrite_func = (dmod_dmfsi_fwrite_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_fwrite_sig);
+    dmod_dmfsi_fwrite_t fwrite_func = (dmod_dmfsi_fwrite_t)get_fs_function(file_entry->mount_point, FS_OP_FWRITE);
 
     if (fwrite_func == NULL)
     {
@@ -1566,8 +1715,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _lseek, (void* fp, dmfsi_
         return -1;
     }
 
-    dmod_dmfsi_lseek_t lseek_func = (dmod_dmfsi_lseek_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_lseek_sig);
+    dmod_dmfsi_lseek_t lseek_func = (dmod_dmfsi_lseek_t)get_fs_function(file_entry->mount_point, FS_OP_LSEEK);
 
     if (lseek_func == NULL)
     {
@@ -1630,8 +1778,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _ftell, (void* fp))
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_tell_t ftell_func = (dmod_dmfsi_tell_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_tell_sig);
+    dmod_dmfsi_tell_t ftell_func = (dmod_dmfsi_tell_t)get_fs_function(file_entry->mount_point, FS_OP_TELL);
     if (ftell_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support ftell\n");
@@ -1690,8 +1837,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _feof, (void* fp))
         return -1;
     }
 
-    dmod_dmfsi_eof_t feof_func = (dmod_dmfsi_eof_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_eof_sig);
+    dmod_dmfsi_eof_t feof_func = (dmod_dmfsi_eof_t)get_fs_function(file_entry->mount_point, FS_OP_EOF);
 
     if (feof_func == NULL)
     {
@@ -1745,8 +1891,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fflush, (void* fp))
         return -1;
     }
 
-    dmod_dmfsi_fflush_t fflush_func = (dmod_dmfsi_fflush_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_fflush_sig);
+    dmod_dmfsi_fflush_t fflush_func = (dmod_dmfsi_fflush_t)get_fs_function(file_entry->mount_point, FS_OP_FFLUSH);
 
     if (fflush_func == NULL)
     {
@@ -1800,8 +1945,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _error, (void* fp))
         return -1;
     }
 
-    dmod_dmfsi_error_t error_func = (dmod_dmfsi_error_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_error_sig);
+    dmod_dmfsi_error_t error_func = (dmod_dmfsi_error_t)get_fs_function(file_entry->mount_point, FS_OP_ERROR);
 
     if (error_func == NULL)
     {
@@ -1851,8 +1995,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _remove, (const char* path))
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_unlink_t remove_func = (dmod_dmfsi_unlink_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_unlink_sig);
+    dmod_dmfsi_unlink_t remove_func = (dmod_dmfsi_unlink_t)get_fs_function(mp_entry, FS_OP_UNLINK);
     int result = -1;
     if (remove_func) {
         dmfsi_context_t mount_context = mp_entry->mount_context;
@@ -1906,8 +2049,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rename, (const char* oldpath, const
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_rename_t rename_func = (dmod_dmfsi_rename_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_rename_sig);
+    dmod_dmfsi_rename_t rename_func = (dmod_dmfsi_rename_t)get_fs_function(mp_entry, FS_OP_RENAME);
     int result = -1;
     if (rename_func) {
         dmfsi_context_t mount_context = mp_entry->mount_context;
@@ -1954,8 +2096,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _ioctl, (void* fp, int command, void
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_ioctl_t ioctl_func = (dmod_dmfsi_ioctl_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_ioctl_sig);
+    dmod_dmfsi_ioctl_t ioctl_func = (dmod_dmfsi_ioctl_t)get_fs_function(file_entry->mount_point, FS_OP_IOCTL);
     if (!ioctl_func)
     {
         unlock_mutex();
@@ -1996,8 +2137,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _sync, (void* fp))
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_sync_t sync_func = (dmod_dmfsi_sync_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_sync_sig);
+    dmod_dmfsi_sync_t sync_func = (dmod_dmfsi_sync_t)get_fs_function(file_entry->mount_point, FS_OP_SYNC);
     if (!sync_func)
     {
         unlock_mutex();
@@ -2046,8 +2186,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, int, _stat, (const char* path, dmfsi_stat
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_stat_t stat_func = (dmod_dmfsi_stat_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_stat_sig);
+    dmod_dmfsi_stat_t stat_func = (dmod_dmfsi_stat_t)get_fs_function(mp_entry, FS_OP_STAT);
     int result = -1;
     if (stat_func) {
         dmfsi_context_t mount_context = mp_entry->mount_context;
@@ -2089,8 +2228,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _getc, (void* fp))
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_getc_t getc_func = (dmod_dmfsi_getc_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_getc_sig);
+    dmod_dmfsi_getc_t getc_func = (dmod_dmfsi_getc_t)get_fs_function(file_entry->mount_point, FS_OP_GETC);
     if (!getc_func)
     {
         unlock_mutex();
@@ -2134,8 +2272,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _putc, (void* fp, int c))
         unlock_mutex();
         return -1;
     }
-    dmod_dmfsi_putc_t putc_func = (dmod_dmfsi_putc_t)Dmod_GetDifFunction(
-        file_entry->mount_point->fs_context, dmod_dmfsi_putc_sig);
+    dmod_dmfsi_putc_t putc_func = (dmod_dmfsi_putc_t)get_fs_function(file_entry->mount_point, FS_OP_PUTC);
     if (!putc_func)
     {
         unlock_mutex();
@@ -2194,8 +2331,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chmod, (const char* path, int mode)
         return -1;
     }
 
-    dmod_dmfsi_chmod_t chmod_func = (dmod_dmfsi_chmod_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_chmod_sig);
+    dmod_dmfsi_chmod_t chmod_func = (dmod_dmfsi_chmod_t)get_fs_function(mp_entry, FS_OP_CHMOD);
 
     if (!chmod_func)
     {
@@ -2266,8 +2402,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _utime, (const char* path, uint32_t 
         return -1;
     }
 
-    dmod_dmfsi_utime_t utime_func = (dmod_dmfsi_utime_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_utime_sig);
+    dmod_dmfsi_utime_t utime_func = (dmod_dmfsi_utime_t)get_fs_function(mp_entry, FS_OP_UTIME);
 
     if (!utime_func)
     {
@@ -2336,8 +2471,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _unlink, (const char* path))
         return -1;
     }
 
-    dmod_dmfsi_unlink_t unlink_func = (dmod_dmfsi_unlink_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_unlink_sig);
+    dmod_dmfsi_unlink_t unlink_func = (dmod_dmfsi_unlink_t)get_fs_function(mp_entry, FS_OP_UNLINK);
 
     if (!unlink_func)
     {
@@ -2407,8 +2541,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _mkdir, (const char* path, int mode)
         return -1;
     }
 
-    dmod_dmfsi_mkdir_t mkdir_func = (dmod_dmfsi_mkdir_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_mkdir_sig);
+    dmod_dmfsi_mkdir_t mkdir_func = (dmod_dmfsi_mkdir_t)get_fs_function(mp_entry, FS_OP_MKDIR);
 
     if (!mkdir_func)
     {
@@ -2476,8 +2609,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _rmdir, (const char* path))
         return -1;
     }
 
-    dmod_dmfsi_unlink_t rmdir_func = (dmod_dmfsi_unlink_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_unlink_sig);
+    dmod_dmfsi_unlink_t rmdir_func = (dmod_dmfsi_unlink_t)get_fs_function(mp_entry, FS_OP_UNLINK);
 
     if (!rmdir_func)
     {
@@ -2546,8 +2678,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _chdir, (const char* path))
         return -1;
     }
 
-    dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_direxists_sig);
+    dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)get_fs_function(mp_entry, FS_OP_DIREXISTS);
 
     dmfsi_context_t mount_context = mp_entry->mount_context;
     const char* fs_path = get_fs_path(abs_path, mp_entry);
@@ -2627,8 +2758,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
         return -1;
     }
 
-    dmod_dmfsi_opendir_t opendir_func = (dmod_dmfsi_opendir_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_opendir_sig);
+    dmod_dmfsi_opendir_t opendir_func = (dmod_dmfsi_opendir_t)get_fs_function(mp_entry, FS_OP_OPENDIR);
 
     if (!opendir_func)
     {
@@ -2661,8 +2791,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     if (!dir_wrapper) {
         DMOD_LOG_ERROR("Failed to allocate directory handle wrapper\n");
         // Close the opened directory
-        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
-            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)get_fs_function(mp_entry, FS_OP_CLOSEDIR);
         if (closedir_func) {
             closedir_func(mount_context, dir_handle);
         }
@@ -2685,8 +2814,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     if (!lock_mutex())
     {
         DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
-            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)get_fs_function(mp_entry, FS_OP_CLOSEDIR);
         if (closedir_func) {
             closedir_func(mount_context, dir_handle);
         }
@@ -2701,8 +2829,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
         DMOD_LOG_ERROR("No free file entries available for directory\n");
         unlock_mutex();
         // Cleanup
-        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
-            mp_entry->fs_context, dmod_dmfsi_closedir_sig);
+        dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)get_fs_function(mp_entry, FS_OP_CLOSEDIR);
         if (closedir_func) {
             closedir_func(mount_context, dir_handle);
         }
@@ -2759,8 +2886,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
     // First, try to read from the underlying filesystem
     if (!dir_wrapper->fs_exhausted)
     {
-        dmod_dmfsi_readdir_t readdir_func = (dmod_dmfsi_readdir_t)Dmod_GetDifFunction(
-            dir_entry->mount_point->fs_context, dmod_dmfsi_readdir_sig);
+        dmod_dmfsi_readdir_t readdir_func = (dmod_dmfsi_readdir_t)get_fs_function(dir_entry->mount_point, FS_OP_READDIR);
 
         if (!readdir_func)
         {
@@ -2869,8 +2995,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
     // Get the directory wrapper
     dir_handle_t* dir_wrapper = (dir_handle_t*)dir_entry->fs_file;
 
-    dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)Dmod_GetDifFunction(
-        dir_entry->mount_point->fs_context, dmod_dmfsi_closedir_sig);
+    dmod_dmfsi_closedir_t closedir_func = (dmod_dmfsi_closedir_t)get_fs_function(dir_entry->mount_point, FS_OP_CLOSEDIR);
 
     if (!closedir_func)
     {
@@ -2943,8 +3068,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _direxists, (const char* path))
         return -1;
     }
 
-    dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)Dmod_GetDifFunction(
-        mp_entry->fs_context, dmod_dmfsi_direxists_sig);
+    dmod_dmfsi_direxists_t direxists_func = (dmod_dmfsi_direxists_t)get_fs_function(mp_entry, FS_OP_DIREXISTS);
 
     if (!direxists_func)
     {

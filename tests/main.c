@@ -18,6 +18,7 @@ static TestResults test_results = {0};
 static bool read_only_mode = false;
 static const char* test_file_path = NULL;
 static const char* test_dir_path = NULL;
+static Dmod_Context_t* fs_module_context = NULL;
 
 // -----------------------------------------
 //
@@ -633,7 +634,67 @@ bool test_dmlist_operations(void)
 
 // -----------------------------------------
 //
+//      Test: File system module disabled while a file is open
+//
+// -----------------------------------------
+bool test_fs_module_disabled(void)
+{
+    TEST_START("Operations while the file system module is disabled");
+    void* fp = NULL;
+
+    int ret = dmvfs_fopen(&fp, "/mnt/disabled_test.txt", DMFSI_O_CREAT | DMFSI_O_WRONLY, 0, 0);
+    if (ret != DMFSI_OK || dmvfs_putc(fp, 'B') != 'B') {
+        if (fp != NULL) dmvfs_fclose(fp);
+        TEST_FAIL("Cannot prepare test file");
+        return false;
+    }
+    dmvfs_fclose(fp);
+
+    ret = dmvfs_fopen(&fp, "/mnt/disabled_test.txt", DMFSI_O_RDONLY, 0, 0);
+    if (ret != DMFSI_OK) {
+        TEST_FAIL("Cannot open test file for reading");
+        return false;
+    }
+
+    // The getc function of the module is cached by now - it must not be
+    // called once the module is gone
+    if (!Dmod_Disable(fs_module_context, true)) {
+        dmvfs_fclose(fp);
+        TEST_FAIL("Cannot disable the file system module");
+        return false;
+    }
+
+    int ch = dmvfs_getc(fp);
+    void* other_fp = NULL;
+    int open_ret = dmvfs_fopen(&other_fp, "/mnt/disabled_test.txt", DMFSI_O_RDONLY, 0, 0);
+
+    if (!Dmod_Enable(fs_module_context, false, NULL)) {
+        TEST_FAIL("Cannot enable the file system module again");
+        return false;
+    }
+
+    if (ch != -1 || open_ret == DMFSI_OK) {
+        if (open_ret == DMFSI_OK) dmvfs_fclose(other_fp);
+        dmvfs_fclose(fp);
+        TEST_FAIL("File system module was called while disabled");
+        return false;
+    }
+
+    ch = dmvfs_getc(fp);
+    dmvfs_fclose(fp);
+    if (ch != 'B') {
+        TEST_FAIL("Read character doesn't match after enabling the module again");
+        return false;
+    }
+
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
 //      Run all tests
+
 //
 // -----------------------------------------
 void run_all_tests(void)
@@ -778,6 +839,7 @@ void run_all_tests(void)
         test_file_seek_tell();
         test_file_eof();
         test_char_io();
+        test_fs_module_disabled();
         test_file_stat();
         test_file_rename();
         test_file_unlink();
@@ -871,6 +933,7 @@ int main( int argc, char *argv[] )
 
     const char* module_name = Dmod_GetName( context );
     printf("Module '%s' loaded and enabled successfully.\n", module_name);
+    fs_module_context = context;
 
     if (!dmvfs_init( 16, 32 ))
     {
