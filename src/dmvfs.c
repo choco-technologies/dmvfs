@@ -81,6 +81,7 @@ static mount_point_t* g_mount_points = NULL;
 static int g_max_mount_points = 0;
 static int g_max_open_files = 0;
 static void* g_mutex = NULL;
+static void* g_load_mutex = NULL;   /* Serializes loading of file system modules - see load_lock() */
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
 static file_t* g_open_files = NULL;
@@ -170,6 +171,34 @@ static inline void unlock_mutex(void)
     else
     {
         Dmod_ExitCritical();
+    }
+}
+
+/*
+ * Loading a file system module is NOT done under g_mutex. Finding a module searches the file
+ * systems (DMOD_REPO_PATHS, e.g. /mnt/<label>/bin on an SD card), which calls back into dmvfs and into the
+ * driver of every volume on the way. A driver that is busy in another thread - FatFs holds its volume
+ * mutex while it reads sectors through dmvfs, which needs g_mutex - then deadlocks with the thread that
+ * holds g_mutex and waits for that volume. This lock only keeps two mounts from loading the same
+ * module twice; nothing that holds it ever takes g_mutex while a driver call is pending.
+ */
+static void load_lock(void)
+{
+    if(g_load_mutex == NULL)
+    {
+        g_load_mutex = Dmod_Mutex_New(true);
+    }
+    if(g_load_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Lock(g_load_mutex);    /* -ENOTSUP before the RTOS runs: nothing to wait for */
+    }
+}
+
+static void load_unlock(void)
+{
+    if(g_load_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Unlock(g_load_mutex);
     }
 }
 
@@ -782,6 +811,8 @@ static bool close_all_file_of_mount_point(mount_point_t* mp_entry)
 
 /**
  * @brief Find file system by name
+ * @note Loads the module when it is not loaded yet, so it must be called WITHOUT g_mutex held - see load_lock().
+ *
  * @param fs_name Name of the file system
  * @return Pointer to the file system context, or NULL if not found
  */
@@ -793,11 +824,7 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
         return NULL;
     }
 
-    if(!lock_mutex())
-    {
-        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        return NULL;
-    }
+    load_lock();
     Dmod_Context_t* fs_context = NULL;
     if(!Dmod_IsModuleLoaded(fs_name))
     {
@@ -819,7 +846,7 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
             if(strcmp(moduleName, fs_name) == 0)
             {
                 DMOD_LOG_VERBOSE("File system '%s' found\n", fs_name);
-                unlock_mutex();
+                load_unlock();
                 return fs_context;
             }
             fs_context = Dmod_GetNextDifModule(dmod_dmfsi_fopen_sig, fs_context);
@@ -833,7 +860,7 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
     {
         DMOD_LOG_WARN("File system '%s' not found\n", fs_name);
     }
-    unlock_mutex();
+    load_unlock();
     return fs_context;
 }
 
@@ -1116,6 +1143,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _deinit, (void))
         Dmod_Mutex_Delete(g_mutex);
     }
     g_mutex = NULL;
+    if(g_load_mutex != NULL)
+    {
+        Dmod_Mutex_Delete(g_load_mutex);
+    }
+    g_load_mutex = NULL;
 
     DMOD_LOG_INFO("DMVFS deinitialized successfully\n");
     return true;
@@ -1175,17 +1207,17 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
         return false;
     }
 
-    if(!lock_mutex())
-    {
-        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        return false;
-    }
-
+    /* Unlocked: loading the module reads the file systems, see load_lock() */
     Dmod_Context_t* fs_context = find_fs_by_name(fs_name);
     if(fs_context == NULL)
     {
         DMOD_LOG_ERROR("Cannot mount file system '%s': Not found\n", fs_name);
-        unlock_mutex();
+        return false;
+    }
+
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return false;
     }
 
