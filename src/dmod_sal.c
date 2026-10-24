@@ -372,6 +372,22 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, bool, _FileAvailable, (const char* Path))
 }
 
 /**
+ * @brief Directory handle of the DMOD SAL API: the dmvfs handle and the last entry read through it
+ *
+ * Dmod_ReadDir()/Dmod_ReadDirEx() return a pointer to the entry, valid until
+ * the next call. It used to be one static buffer for everybody: a thread
+ * reading /mnt while another one walked a configuration directory renamed the
+ * other's entry under it ("carhmi.ini" read as "DMODOS"). Each handle keeps
+ * its own now, so directories read in different threads do not interfere.
+ */
+typedef struct
+{
+    void*           dp;             // dmvfs directory handle
+    char            name[256];      // Name of the last entry read
+    Dmod_DirEntry_t entry;          // The last entry read (entry.name points to name)
+} sal_dir_t;
+
+/**
  * @brief Open a directory
  * 
  * @param Path Path to the directory
@@ -383,32 +399,23 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, void*, _OpenDir, (const char* Path))
     {
         return NULL;
     }
-    
-    void* dp = NULL;
-    int ret = dmvfs_opendir(&dp, Path);
-    
-    if (ret != 0)
+
+    sal_dir_t* dir = Dmod_Malloc(sizeof(sal_dir_t));
+    if (dir == NULL)
     {
         return NULL;
     }
-    
-    return dp;
-}
+    memset(dir, 0, sizeof(*dir));
 
-/**
- * @brief Directory entry storage for ReadDir and ReadDirEx
- * 
- * We need to store the last directory entry because the DMOD SAL API
- * returns a const char* / const Dmod_DirEntry_t* which must persist until
- * the next call.
- * 
- * @note Thread safety: These static buffers are NOT thread-safe. Concurrent
- *       calls to _ReadDir or _ReadDirEx from different threads may result in
- *       race conditions. The DMOD SAL API design requires this pattern.
- *       Callers should ensure thread-safe access if needed.
- */
-static char g_last_dir_entry_name[256] = {0};
-static Dmod_DirEntry_t g_last_dir_entry = {0};
+    int ret = dmvfs_opendir(&dir->dp, Path);
+    if (ret != 0 || dir->dp == NULL)
+    {
+        Dmod_Free(dir);
+        return NULL;
+    }
+
+    return dir;
+}
 
 /**
  * @brief Read the next directory entry
@@ -418,24 +425,8 @@ static Dmod_DirEntry_t g_last_dir_entry = {0};
  */
 DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const char*, _ReadDir, (void* Dir))
 {
-    if (Dir == NULL)
-    {
-        return NULL;
-    }
-    
-    dmfsi_dir_entry_t entry;
-    int ret = dmvfs_readdir(Dir, &entry);
-    
-    if (ret != 0)
-    {
-        return NULL;
-    }
-    
-    // Copy entry name to persistent storage
-    strncpy(g_last_dir_entry_name, entry.name, sizeof(g_last_dir_entry_name) - 1);
-    g_last_dir_entry_name[sizeof(g_last_dir_entry_name) - 1] = '\0';
-    
-    return g_last_dir_entry_name;
+    const Dmod_DirEntry_t* entry = Dmod_ReadDirEx(Dir);
+    return (entry != NULL) ? entry->name : NULL;
 }
 
 /**
@@ -444,40 +435,34 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const char*, _ReadDir, (void* Dir))
  * @param Dir Directory handle
  * @return const Dmod_DirEntry_t* Pointer to entry info, or NULL if no more entries
  * 
- * @note The returned pointer points to static storage that may be overwritten by subsequent calls.
- *       Not thread-safe: use separate directory handles per thread.
+ * @note The returned entry belongs to the handle and stays valid until the next
+ *       call with it or Dmod_CloseDir(). One handle must not be read from two
+ *       threads at once; different handles may.
  */
 DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const Dmod_DirEntry_t*, _ReadDirEx, (void* Dir))
 {
-    if (Dir == NULL)
+    sal_dir_t* dir = (sal_dir_t*)Dir;
+    if (dir == NULL)
     {
         return NULL;
     }
 
     dmfsi_dir_entry_t entry;
-    int ret = dmvfs_readdir(Dir, &entry);
+    int ret = dmvfs_readdir(dir->dp, &entry);
 
     if (ret != 0)
     {
         return NULL;
     }
 
-    // Copy entry name to persistent storage (reuse the existing buffer)
-    strncpy(g_last_dir_entry_name, entry.name, sizeof(g_last_dir_entry_name) - 1);
-    g_last_dir_entry_name[sizeof(g_last_dir_entry_name) - 1] = '\0';
+    strncpy(dir->name, entry.name, sizeof(dir->name) - 1);
+    dir->name[sizeof(dir->name) - 1] = '\0';
 
     // Map dmfsi attr flags to Dmod_DirEntryType_t
-    g_last_dir_entry.name = g_last_dir_entry_name;
-    if (entry.attr & DMFSI_ATTR_DIRECTORY)
-    {
-        g_last_dir_entry.type = Dmod_DirEntryType_Dir;
-    }
-    else
-    {
-        g_last_dir_entry.type = Dmod_DirEntryType_File;
-    }
+    dir->entry.name = dir->name;
+    dir->entry.type = (entry.attr & DMFSI_ATTR_DIRECTORY) ? Dmod_DirEntryType_Dir : Dmod_DirEntryType_File;
 
-    return &g_last_dir_entry;
+    return &dir->entry;
 }
 
 /**
@@ -487,9 +472,11 @@ DMOD_INPUT_API_DECLARATION(Dmod, 1.0, const Dmod_DirEntry_t*, _ReadDirEx, (void*
  */
 DMOD_INPUT_API_DECLARATION(Dmod, 1.0, void, _CloseDir, (void* Dir))
 {
-    if (Dir != NULL)
+    sal_dir_t* dir = (sal_dir_t*)Dir;
+    if (dir != NULL)
     {
-        dmvfs_closedir(Dir);
+        dmvfs_closedir(dir->dp);
+        Dmod_Free(dir);
     }
 }
 
