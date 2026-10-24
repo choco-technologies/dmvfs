@@ -13,6 +13,27 @@ DMOD_BUILTIN_API( dmvfs, 1.0, int, _get_max_open_files, (void) );
 DMOD_BUILTIN_API( dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, const char* mount_point, const char* config) );
 DMOD_BUILTIN_API( dmvfs, 1.0, bool, _unmount_fs, (const char* mount_point) );
 
+/**
+ * @brief Called when a file system is mounted or is about to be unmounted
+ *
+ * @param mount_point Mount point path, as given to dmvfs_mount_fs()/dmvfs_unmount_fs()
+ * @param mounted     true: the file system is mounted and usable; false: it is
+ *                    about to be unmounted (it is still usable during the call)
+ * @param user_data   The pointer given to dmvfs_add_mount_listener()
+ *
+ * Called without dmvfs's own mutex held, so a listener may use files (also the
+ * ones on @p mount_point) and mount or unmount file systems itself. Listener
+ * calls are serialized: one listener call at a time, in the thread that mounts
+ * or unmounts. A listener must not wait for another thread that mounts or
+ * unmounts. A mount may be reported twice (a listener added while it is being
+ * mounted, an unmount that failed) - a listener treats a repeated report as a
+ * no-op.
+ */
+typedef void (*dmvfs_mount_listener_t)(const char* mount_point, bool mounted, void* user_data);
+
+DMOD_BUILTIN_API( dmvfs, 1.0, int, _add_mount_listener, (dmvfs_mount_listener_t listener, void* user_data) );
+DMOD_BUILTIN_API( dmvfs, 1.0, int, _remove_mount_listener, (dmvfs_mount_listener_t listener, void* user_data) );
+
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fopen, (void** fp, const char* path, int mode, int attr, int pid) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose, (void* fp) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose_process, (int pid) );

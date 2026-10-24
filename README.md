@@ -178,6 +178,23 @@ int main(void) {
 #### Mount Management
 - `dmvfs_mount_fs(fs_name, mount_point, config)` - Mount a file system
 - `dmvfs_unmount_fs(mount_point)` - Unmount a file system
+- `dmvfs_add_mount_listener(listener, user_data)` - Be told about every mount and unmount
+- `dmvfs_remove_mount_listener(listener, user_data)` - Stop being told
+
+A mount listener (`dmvfs_mount_listener_t`) is called with `mounted == true`
+after a file system is mounted, and with `mounted == false` before it is
+unmounted - while it can still be used, so whatever was started from it can
+stop first. A listener added later is told at once about every file system
+mounted already. It is how a module reacts to a new volume without knowing who
+mounted it (automount, the `mount` command, the firmware at boot) - e.g.
+libsystemd and dmdevfs load the configuration directory (`cfg/`) every mount
+point may have.
+
+Listeners are called without dmvfs's own mutex held, one call at a time, in
+the thread that mounts or unmounts: a listener may read files and mount or
+unmount itself, but must not wait for another thread that does. A mount may be
+reported twice (a listener added while it is being mounted, an unmount that
+failed), so a listener treats a repeated report as a no-op.
 
 #### File Operations
 - `dmvfs_fopen(fp, path, mode, attr, pid)` - Open a file

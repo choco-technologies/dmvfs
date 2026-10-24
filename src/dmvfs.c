@@ -77,11 +77,23 @@ typedef struct {
     int pid;                       // Process ID
 } dir_handle_t;
 
+/**
+ * @brief Maximum number of listeners added with dmvfs_add_mount_listener()
+ */
+#define DMVFS_MAX_MOUNT_LISTENERS   8
+
+typedef struct {
+    dmvfs_mount_listener_t listener;
+    void* user_data;
+} mount_listener_t;
+
 static mount_point_t* g_mount_points = NULL;
 static int g_max_mount_points = 0;
 static int g_max_open_files = 0;
 static void* g_mutex = NULL;
 static void* g_load_mutex = NULL;   /* Serializes loading of file system modules - see load_lock() */
+static void* g_listener_mutex = NULL;   /* Guards g_mount_listeners, held while they are called - see listener_lock() */
+static mount_listener_t g_mount_listeners[DMVFS_MAX_MOUNT_LISTENERS];
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
 static file_t* g_open_files = NULL;
@@ -200,6 +212,50 @@ static void load_unlock(void)
     {
         (void)Dmod_Mutex_Unlock(g_load_mutex);
     }
+}
+
+/*
+ * The mount listeners are called with this lock held and g_mutex released: a listener reads files (a
+ * configuration directory on the new mount) and may mount or unmount itself, both of which need g_mutex.
+ * Recursive, so a mount made by a listener reports to the listeners in the same thread. Held while the
+ * listeners run, so dmvfs_remove_mount_listener() returns only once the listener is no longer running.
+ */
+static void listener_lock(void)
+{
+    if(g_listener_mutex == NULL)
+    {
+        g_listener_mutex = Dmod_Mutex_New(true);
+    }
+    if(g_listener_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Lock(g_listener_mutex);    /* -ENOTSUP before the RTOS runs: nothing to wait for */
+    }
+}
+
+static void listener_unlock(void)
+{
+    if(g_listener_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Unlock(g_listener_mutex);
+    }
+}
+
+/**
+ * @brief Tell every mount listener that a file system was mounted or is about to be unmounted
+ *
+ * @note Must be called without g_mutex held - see listener_lock().
+ */
+static void notify_mount_listeners(const char* mount_point, bool mounted)
+{
+    listener_lock();
+    for(int i = 0; i < DMVFS_MAX_MOUNT_LISTENERS; i++)
+    {
+        if(g_mount_listeners[i].listener != NULL)
+        {
+            g_mount_listeners[i].listener(mount_point, mounted, g_mount_listeners[i].user_data);
+        }
+    }
+    listener_unlock();
 }
 
 /**
@@ -1149,6 +1205,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _deinit, (void))
     }
     g_load_mutex = NULL;
 
+    /* The file systems above went away without telling the listeners: the system is going down */
+    memset(g_mount_listeners, 0, sizeof(g_mount_listeners));
+    if(g_listener_mutex != NULL)
+    {
+        Dmod_Mutex_Delete(g_listener_mutex);
+    }
+    g_listener_mutex = NULL;
+
     DMOD_LOG_INFO("DMVFS deinitialized successfully\n");
     return true;
 }
@@ -1245,6 +1309,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
     }
 
     DMOD_LOG_INFO("File system '%s' mounted at '%s' successfully\n", fs_name, mount_point);
+
+    notify_mount_listeners(mount_point, true);
     return true;
 }
 
@@ -1271,17 +1337,149 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _unmount_fs, (const char* mount_poi
         DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return false;
     }
+    bool exists = false;
+    for(int i = 0; i < g_max_mount_points && !exists; i++)
+    {
+        exists = g_mount_points[i].mount_point != NULL && strcmp(g_mount_points[i].mount_point, mount_point) == 0;
+    }
+    unlock_mutex();
+    if(!exists)
+    {
+        DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s': Not mounted\n", mount_point);
+        return false;
+    }
+
+    /* While the file system is still usable: what was started from it stops first */
+    notify_mount_listeners(mount_point, false);
+
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        notify_mount_listeners(mount_point, true);
+        return false;
+    }
 
     if(!remove_mount_point(mount_point))
     {
         DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s'\n", mount_point);
         unlock_mutex();
+        notify_mount_listeners(mount_point, true);
         return false;
     }
 
     unlock_mutex();
     DMOD_LOG_INFO("File system at mount point '%s' unmounted successfully\n", mount_point);
     return true;
+}
+
+/**
+ * @brief Add a mount listener
+ *
+ * @p listener is called for every file system mounted and about to be unmounted from now on (see
+ * dmvfs_mount_listener_t), and at once for every file system already mounted - so a module added late
+ * (when the system is already running) sees the same as one added at boot.
+ *
+ * @param listener  Function to call (must not be NULL)
+ * @param user_data Passed to @p listener as is
+ *
+ * @retval 0          Added
+ * @retval -EINVAL    @p listener is NULL
+ * @retval -EALREADY  This listener with this user_data is already added
+ * @retval -ENOMEM    DMVFS_MAX_MOUNT_LISTENERS listeners are added already, or out of memory
+ */
+DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _add_mount_listener, (dmvfs_mount_listener_t listener, void* user_data))
+{
+    if(listener == NULL)
+    {
+        return -EINVAL;
+    }
+
+    listener_lock();
+    int free_slot = -1;
+    for(int i = 0; i < DMVFS_MAX_MOUNT_LISTENERS; i++)
+    {
+        if(g_mount_listeners[i].listener == listener && g_mount_listeners[i].user_data == user_data)
+        {
+            listener_unlock();
+            return -EALREADY;
+        }
+        if(g_mount_listeners[i].listener == NULL && free_slot < 0)
+        {
+            free_slot = i;
+        }
+    }
+    if(free_slot < 0)
+    {
+        listener_unlock();
+        DMOD_LOG_ERROR("Cannot add mount listener: %d listeners added already\n", DMVFS_MAX_MOUNT_LISTENERS);
+        return -ENOMEM;
+    }
+
+    /* The mounts there are now, copied: the listener is called without g_mutex held */
+    char** mounted = NULL;
+    int count = 0;
+    if(is_initialized() && lock_mutex())
+    {
+        mounted = Dmod_Malloc(sizeof(char*) * g_max_mount_points);
+        for(int i = 0; mounted != NULL && i < g_max_mount_points; i++)
+        {
+            if(g_mount_points[i].mount_point != NULL)
+            {
+                mounted[count] = duplicate_string(g_mount_points[i].mount_point);
+                count += mounted[count] != NULL ? 1 : 0;
+            }
+        }
+        unlock_mutex();
+        if(mounted == NULL)
+        {
+            listener_unlock();
+            return -ENOMEM;
+        }
+    }
+
+    g_mount_listeners[free_slot].listener = listener;
+    g_mount_listeners[free_slot].user_data = user_data;
+
+    for(int i = 0; i < count; i++)
+    {
+        listener(mounted[i], true, user_data);
+        Dmod_Free(mounted[i]);
+    }
+    Dmod_Free(mounted);
+    listener_unlock();
+    return 0;
+}
+
+/**
+ * @brief Remove a mount listener added with dmvfs_add_mount_listener()
+ *
+ * Returns once the listener is not running anymore (in another thread), so the code of a module that
+ * removes its listener before it is unloaded is not called afterwards.
+ *
+ * @retval 0       Removed
+ * @retval -EINVAL @p listener is NULL
+ * @retval -ENOENT This listener with this user_data is not added
+ */
+DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _remove_mount_listener, (dmvfs_mount_listener_t listener, void* user_data))
+{
+    if(listener == NULL)
+    {
+        return -EINVAL;
+    }
+
+    listener_lock();
+    for(int i = 0; i < DMVFS_MAX_MOUNT_LISTENERS; i++)
+    {
+        if(g_mount_listeners[i].listener == listener && g_mount_listeners[i].user_data == user_data)
+        {
+            g_mount_listeners[i].listener = NULL;
+            g_mount_listeners[i].user_data = NULL;
+            listener_unlock();
+            return 0;
+        }
+    }
+    listener_unlock();
+    return -ENOENT;
 }
 
 /**

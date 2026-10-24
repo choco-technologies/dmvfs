@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 #include "dmod.h"
 #include "dmvfs.h"
 #include "dmlist.h"
@@ -371,6 +372,112 @@ bool test_file_unlink(void)
         return false;
     }
     
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
+//      Test: Mount listeners
+//
+// -----------------------------------------
+typedef struct {
+    int mounted;            // Reports with mounted == true
+    int unmounted;          // Reports with mounted == false
+    char last[64];          // Mount point of the last report
+    bool still_mounted;     // At an unmount report: the mount point could still be listed
+} listener_log_t;
+
+static void log_mount_listener(const char* mount_point, bool mounted, void* user_data)
+{
+    listener_log_t* log = (listener_log_t*)user_data;
+    snprintf(log->last, sizeof(log->last), "%s", mount_point);
+    if (mounted) {
+        log->mounted++;
+    } else {
+        log->unmounted++;
+        void* dp = NULL;
+        log->still_mounted = dmvfs_opendir(&dp, mount_point) == DMFSI_OK && dp != NULL;
+        if (dp != NULL) {
+            dmvfs_closedir(dp);
+        }
+    }
+}
+
+// Mounts /nested when it is told about /outer: a listener may mount itself
+static void nesting_mount_listener(const char* mount_point, bool mounted, void* user_data)
+{
+    if (mounted && strcmp(mount_point, "/outer") == 0) {
+        dmvfs_mount_fs((const char*)user_data, "/nested", NULL);
+    }
+}
+
+bool test_mount_listeners(void)
+{
+    TEST_START("Mount listeners");
+
+    const char* fs_name = Dmod_GetName(fs_module_context);
+    listener_log_t log = {0};
+
+    // Added while /mnt is mounted: told about it at once
+    if (dmvfs_add_mount_listener(log_mount_listener, &log) != 0) {
+        TEST_FAIL("Cannot add a mount listener");
+        return false;
+    }
+    if (log.mounted != 1 || strcmp(log.last, "/mnt") != 0) {
+        TEST_FAIL("A new listener is not told about the mounts there are");
+        dmvfs_remove_mount_listener(log_mount_listener, &log);
+        return false;
+    }
+    if (dmvfs_add_mount_listener(log_mount_listener, &log) != -EALREADY) {
+        TEST_FAIL("The same listener is added twice");
+        dmvfs_remove_mount_listener(log_mount_listener, &log);
+        return false;
+    }
+
+    // Told after the mount and before the unmount, while it can still be used
+    bool ok = dmvfs_mount_fs(fs_name, "/lst", NULL);
+    ok = ok && log.mounted == 2 && strcmp(log.last, "/lst") == 0;
+    ok = ok && dmvfs_unmount_fs("/lst");
+    ok = ok && log.unmounted == 1 && strcmp(log.last, "/lst") == 0 && log.still_mounted;
+    if (!ok) {
+        TEST_FAIL("Mount/unmount not reported as expected");
+        dmvfs_remove_mount_listener(log_mount_listener, &log);
+        return false;
+    }
+
+    // A failed unmount (nothing mounted there) reports nothing
+    if (dmvfs_unmount_fs("/lst") || log.unmounted != 1) {
+        TEST_FAIL("Unmounting what is not mounted is reported");
+        dmvfs_remove_mount_listener(log_mount_listener, &log);
+        return false;
+    }
+
+    // A listener that mounts: the nested mount is reported to every listener too
+    ok = dmvfs_add_mount_listener(nesting_mount_listener, (void*)fs_name) == 0;
+    ok = ok && dmvfs_mount_fs(fs_name, "/outer", NULL);
+    ok = ok && log.mounted == 4;    // /outer and /nested
+    dmvfs_remove_mount_listener(nesting_mount_listener, (void*)fs_name);
+    ok = ok && dmvfs_unmount_fs("/nested") && dmvfs_unmount_fs("/outer");
+    if (!ok) {
+        TEST_FAIL("A mount made by a listener is not handled");
+        dmvfs_remove_mount_listener(log_mount_listener, &log);
+        return false;
+    }
+
+    // Removed: no more reports
+    if (dmvfs_remove_mount_listener(log_mount_listener, &log) != 0 ||
+        dmvfs_remove_mount_listener(log_mount_listener, &log) != -ENOENT) {
+        TEST_FAIL("Cannot remove the mount listener");
+        return false;
+    }
+    int reports = log.mounted + log.unmounted;
+    ok = dmvfs_mount_fs(fs_name, "/lst", NULL) && dmvfs_unmount_fs("/lst");
+    if (!ok || log.mounted + log.unmounted != reports) {
+        TEST_FAIL("A removed listener is still called");
+        return false;
+    }
+
     TEST_PASS();
     return true;
 }
@@ -850,6 +957,9 @@ void run_all_tests(void)
     
     // PWD tests (run in both modes)
     test_pwd_operations();
+
+    // Mount listener tests (run in both modes)
+    test_mount_listeners();
     
     // DMLIST library tests (run in both modes)
     test_dmlist_operations();
