@@ -83,6 +83,7 @@ static int g_max_mount_points = 0;
 static int g_max_open_files = 0;
 static void* g_mutex = NULL;
 static void* g_load_mutex = NULL;   /* Serializes loading of file system modules - see load_lock() */
+static void* g_mount_mutex = NULL;  /* Serializes mounts and unmounts - see mount_lock() */
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
 static file_t* g_open_files = NULL;
@@ -200,6 +201,33 @@ static void load_unlock(void)
     if(g_load_mutex != NULL)
     {
         (void)Dmod_Mutex_Unlock(g_load_mutex);
+    }
+}
+
+/*
+ * Mounts and unmounts run one at a time, but not under g_mutex (see add_mount_point()): two mounts of the same
+ * device - the "ext" unit mounting the external flash at /ext and automount probing the same node - must not
+ * initialize the file system at once, or both may fail. File operations do not take this lock, so a driver that
+ * needs dmvfs while a file system is being initialized on its device still gets through. Recursive: a mount made
+ * by a file system's init (or a mount report) in the same thread does not wait for itself.
+ */
+static void mount_lock(void)
+{
+    if(g_mount_mutex == NULL)
+    {
+        g_mount_mutex = Dmod_Mutex_New(true);
+    }
+    if(g_mount_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Lock(g_mount_mutex);    /* -ENOTSUP before the RTOS runs: nothing to wait for */
+    }
+}
+
+static void mount_unlock(void)
+{
+    if(g_mount_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Unlock(g_mount_mutex);
     }
 }
 
@@ -1200,6 +1228,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _deinit, (void))
         Dmod_Mutex_Delete(g_load_mutex);
     }
     g_load_mutex = NULL;
+    if(g_mount_mutex != NULL)
+    {
+        Dmod_Mutex_Delete(g_mount_mutex);
+    }
+    g_mount_mutex = NULL;
 
     DMOD_LOG_INFO("DMVFS deinitialized successfully\n");
     return true;
@@ -1267,8 +1300,10 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
         return false;
     }
 
-    /* Unlocked: the file system's init does I/O, see add_mount_point() */
+    /* Without g_mutex, but one mount at a time: the file system's init does I/O, see add_mount_point() */
+    mount_lock();
     mount_point_t* mp_entry = add_mount_point(mount_point, fs_context, config);
+    mount_unlock();
     if(mp_entry == NULL)
     {
         DMOD_LOG_ERROR("Cannot mount file system '%s'\n", fs_name);
@@ -1317,8 +1352,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _unmount_fs, (const char* mount_poi
         return false;
     }
 
-    /* Unlocked: the file system's deinit does I/O, see remove_mount_point() */
-    if(!remove_mount_point(mount_point))
+    /* Without g_mutex, but one unmount at a time: the file system's deinit does I/O, see remove_mount_point() */
+    mount_lock();
+    bool removed = remove_mount_point(mount_point);
+    mount_unlock();
+    if(!removed)
     {
         DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s'\n", mount_point);
         return false;
