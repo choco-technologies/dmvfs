@@ -83,6 +83,7 @@ static int g_max_mount_points = 0;
 static int g_max_open_files = 0;
 static void* g_mutex = NULL;
 static void* g_load_mutex = NULL;   /* Serializes loading of file system modules - see load_lock() */
+static void* g_listener_mutex = NULL;   /* Serializes the mount reports (dmfsi's _mount_changed dif) - see listener_lock() */
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
 static file_t* g_open_files = NULL;
@@ -201,6 +202,55 @@ static void load_unlock(void)
     {
         (void)Dmod_Mutex_Unlock(g_load_mutex);
     }
+}
+
+/*
+ * The modules implementing dmfsi's _mount_changed dif are called with this lock held and g_mutex
+ * released: they read files (a configuration directory on the new mount) and may mount or unmount themselves,
+ * both of which need g_mutex. Recursive, so a mount made from a report is reported in the same thread.
+ */
+static void listener_lock(void)
+{
+    if(g_listener_mutex == NULL)
+    {
+        g_listener_mutex = Dmod_Mutex_New(true);
+    }
+    if(g_listener_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Lock(g_listener_mutex);    /* -ENOTSUP before the RTOS runs: nothing to wait for */
+    }
+}
+
+static void listener_unlock(void)
+{
+    if(g_listener_mutex != NULL)
+    {
+        (void)Dmod_Mutex_Unlock(g_listener_mutex);
+    }
+}
+
+/**
+ * @brief Tell every module implementing dmfsi's _mount_changed dif that a file system was mounted or is about to be
+ *        unmounted (see dmfsi.h)
+ *
+ * Only enabled modules are found: a module that was unloaded or crashed out is not called.
+ *
+ * @note Must be called without g_mutex held - see listener_lock().
+ */
+static void notify_mount_listeners(const char* mount_point, bool mounted)
+{
+    listener_lock();
+    Dmod_Context_t* module = NULL;
+    while((module = Dmod_GetNextDifModule(dmod_dmfsi_mount_changed_sig, module)) != NULL)
+    {
+        dmod_dmfsi_mount_changed_t mount_changed =
+            (dmod_dmfsi_mount_changed_t)Dmod_GetDifFunction(module, dmod_dmfsi_mount_changed_sig);
+        if(mount_changed != NULL)
+        {
+            mount_changed(mount_point, mounted);
+        }
+    }
+    listener_unlock();
 }
 
 /**
@@ -1201,6 +1251,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _deinit, (void))
     }
     g_load_mutex = NULL;
 
+    /* The file systems above went away without a report: the system is going down */
+    if(g_listener_mutex != NULL)
+    {
+        Dmod_Mutex_Delete(g_listener_mutex);
+    }
+    g_listener_mutex = NULL;
+
     DMOD_LOG_INFO("DMVFS deinitialized successfully\n");
     return true;
 }
@@ -1296,6 +1353,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
     }
 
     DMOD_LOG_INFO("File system '%s' mounted at '%s' successfully\n", fs_name, mount_point);
+
+    notify_mount_listeners(mount_point, true);
     return true;
 }
 
@@ -1317,15 +1376,86 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _unmount_fs, (const char* mount_poi
         return false;
     }
 
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        return false;
+    }
+    bool exists = false;
+    for(int i = 0; i < g_max_mount_points && !exists; i++)
+    {
+        exists = g_mount_points[i].mount_point != NULL && strcmp(g_mount_points[i].mount_point, mount_point) == 0;
+    }
+    unlock_mutex();
+    if(!exists)
+    {
+        DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s': Not mounted\n", mount_point);
+        return false;
+    }
+
+    /* While the file system is still usable: what was started from it stops first */
+    notify_mount_listeners(mount_point, false);
+
     /* Unlocked: the file system's deinit does I/O, see remove_mount_point() */
     if(!remove_mount_point(mount_point))
     {
         DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s'\n", mount_point);
+        notify_mount_listeners(mount_point, true);
         return false;
     }
 
     DMOD_LOG_INFO("File system at mount point '%s' unmounted successfully\n", mount_point);
     return true;
+}
+
+/**
+ * @brief Read the mount point at @p index of the ones there are now
+ *
+ * For a module implementing dmfsi's _mount_changed dif enabled when file systems are mounted already:
+ *
+ *     char path[64];
+ *     for(int i = 0; dmvfs_get_mount_point(i, path, sizeof(path)) == 0; i++) { ... }
+ *
+ * @param index  0 for the first one
+ * @param buffer Receives the mount point path
+ * @param size   Size of @p buffer
+ *
+ * @retval 0       @p buffer holds the mount point
+ * @retval -ENOENT There are not that many mount points
+ * @retval -ERANGE @p buffer is too small
+ * @retval -EINVAL @p buffer is NULL or @p index negative
+ */
+DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _get_mount_point, (int index, char* buffer, size_t size))
+{
+    if(buffer == NULL || size == 0 || index < 0)
+    {
+        return -EINVAL;
+    }
+    if(!is_initialized() || !lock_mutex())
+    {
+        return -ENOENT;
+    }
+
+    int result = -ENOENT;
+    int found = 0;
+    for(int i = 0; i < g_max_mount_points && result == -ENOENT; i++)
+    {
+        const char* mount_point = g_mount_points[i].mount_point;
+        if(mount_point == NULL || found++ != index)
+        {
+            continue;
+        }
+        size_t len = strlen(mount_point);
+        if(len >= size)
+        {
+            result = -ERANGE;
+            break;
+        }
+        memcpy(buffer, mount_point, len + 1);
+        result = 0;
+    }
+    unlock_mutex();
+    return result;
 }
 
 /**

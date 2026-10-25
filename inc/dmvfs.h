@@ -13,6 +13,10 @@ DMOD_BUILTIN_API( dmvfs, 1.0, int, _get_max_open_files, (void) );
 DMOD_BUILTIN_API( dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, const char* mount_point, const char* config) );
 DMOD_BUILTIN_API( dmvfs, 1.0, bool, _unmount_fs, (const char* mount_point) );
 
+/* Mount points there are now, one by one - for a module implementing dmfsi's _mount_changed dif enabled after them:
+ * 0, -ENOENT past the last one, -ERANGE: buffer too small */
+DMOD_BUILTIN_API( dmvfs, 1.0, int, _get_mount_point, (int index, char* buffer, size_t size) );
+
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fopen, (void** fp, const char* path, int mode, int attr, int pid) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose, (void* fp) );
 DMOD_BUILTIN_API( dmvfs, 1.0, int, _fclose_process, (int pid) );
