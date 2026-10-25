@@ -56,6 +56,7 @@ typedef struct {
     dmfsi_context_t mount_context;
     fs_cache_t* fs_cache;      /**< Cached DIF functions of fs_context (see get_fs_function) */
     volatile int ref_count;    /**< In-flight operations referencing this mount point (see mount_point_acquire/release) */
+    bool reserved;             /**< Being mounted or unmounted: not free, not visible yet/anymore (see add_mount_point) */
 } mount_point_t;
 
 typedef struct {
@@ -558,7 +559,7 @@ static mount_point_t* find_free_mount_point(void)
 
     for(int i = 0; i < g_max_mount_points; i++)
     {
-        if(g_mount_points[i].mount_point == NULL)
+        if(g_mount_points[i].mount_point == NULL && !g_mount_points[i].reserved)
         {
             return &g_mount_points[i];
         }
@@ -866,6 +867,14 @@ static Dmod_Context_t* find_fs_by_name(const char* fs_name)
 
 /**
  * @brief Add mount point
+ *
+ * The file system's init runs WITHOUT g_mutex held: it usually does I/O - a littlefs reads its device, through
+ * dmdevfs and the device's driver, which takes a lock of its own and may need dmvfs for its bus (dmspiflash reaches
+ * its QSPI bus through a /dev node). Run under g_mutex, it deadlocked with a thread that held that driver lock and
+ * waited for g_mutex. Under g_mutex only the slot is reserved and, once the init is done, published.
+ *
+ * @note Must be called without g_mutex held.
+ *
  * @param mount_point Mount point path
  * @param fs_context File system context
  * @param config Configuration string for the file system (file system specific)
@@ -892,48 +901,80 @@ static mount_point_t* add_mount_point(const char* mount_point, Dmod_Context_t* f
         return NULL;
     }
 
-    Dmod_BeginUsage(module_name);
-
-    mount_point_t* free_entry = find_free_mount_point();
-    if(free_entry == NULL)
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        return NULL;
+    }
+    mount_point_t* slot = find_free_mount_point();
+    if(slot != NULL)
+    {
+        slot->reserved = true;
+    }
+    unlock_mutex();
+    if(slot == NULL)
     {
         return NULL;
     }
 
+    Dmod_BeginUsage(module_name);
+
+    dmfsi_context_t mount_context = NULL;
     dmod_dmfsi_init_t init_func = (dmod_dmfsi_init_t)Dmod_GetDifFunction(fs_context, dmod_dmfsi_init_sig);
     if(init_func != NULL)
     {
-        free_entry->mount_context = init_func(config);
-        if(free_entry->mount_context == NULL)
+        mount_context = init_func(config);
+        if(mount_context == NULL)
         {
             DMOD_LOG_ERROR("Failed to initialize mount context for mount point '%s'\n", mount_point);
-            return NULL;
         }
     }
-
-    free_entry->mount_point = Dmod_Malloc(strlen(mount_point) + 1);
-    if(free_entry->mount_point == NULL)
+    char* path = (init_func == NULL || mount_context != NULL) ? Dmod_Malloc(strlen(mount_point) + 1) : NULL;
+    fs_cache_t* cache = (path != NULL) ? create_fs_cache(fs_context) : NULL;
+    if(cache == NULL)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for mount point\n");
+        if(mount_context != NULL)
+        {
+            DMOD_LOG_ERROR("Failed to allocate memory for mount point '%s'\n", mount_point);
+            dmod_dmfsi_deinit_t deinit_func = (dmod_dmfsi_deinit_t)Dmod_GetDifFunction(fs_context, dmod_dmfsi_deinit_sig);
+            if(deinit_func != NULL)
+            {
+                deinit_func(mount_context);
+            }
+        }
+        Dmod_Free(path);
+        Dmod_EndUsage(module_name);
+        if(lock_mutex())
+        {
+            slot->reserved = false;
+            unlock_mutex();
+        }
         return NULL;
     }
+    strcpy(path, mount_point);
 
-
-    strcpy(free_entry->mount_point, mount_point);
-    free_entry->fs_cache = create_fs_cache(fs_context);
-    if(free_entry->fs_cache == NULL)
+    if(!lock_mutex())
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for mount point '%s'\n", mount_point);
-        Dmod_Free(free_entry->mount_point);
-        free_entry->mount_point = NULL;
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return NULL;
     }
-    free_entry->fs_context = fs_context;
-    return free_entry;
+    slot->mount_context = mount_context;
+    slot->fs_cache = cache;
+    slot->fs_context = fs_context;
+    slot->mount_point = path;
+    slot->reserved = false;
+    unlock_mutex();
+    return slot;
 }
 
 /**
  * @brief Remove mount point
+ *
+ * Unpublished under g_mutex (no new operation finds it), deinitialized without it - for the same reason the init
+ * runs without it, see add_mount_point().
+ *
+ * @note Must be called without g_mutex held, except from dmvfs_deinit() (the system going down).
+ *
  * @param mount_point Mount point path
  * @return true on success, false on failure
  */
@@ -945,45 +986,56 @@ static bool remove_mount_point(const char* mount_point)
         return false;
     }
 
+    if(!lock_mutex())
+    {
+        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
+        return false;
+    }
     mount_point_t* mp_entry = find_mount_point(mount_point);
     if(mp_entry == NULL)
     {
+        unlock_mutex();
         DMOD_LOG_ERROR("Mount point '%s' not found\n", mount_point);
         return false;
     }
-
     if(mp_entry->ref_count > 0)
     {
-        DMOD_LOG_ERROR("Mount point '%s' is busy (%d in-flight operation(s)), cannot unmount\n",
-            mount_point, mp_entry->ref_count);
+        int busy = mp_entry->ref_count;
+        unlock_mutex();
+        DMOD_LOG_ERROR("Mount point '%s' is busy (%d in-flight operation(s)), cannot unmount\n", mount_point, busy);
         return false;
     }
 
     dmod_dmfsi_deinit_t deinit_func = (dmod_dmfsi_deinit_t)get_fs_function(mp_entry, FS_OP_DEINIT);
-    if(deinit_func != NULL)
-    {
-        int result = deinit_func(mp_entry->mount_context);
-        if(result != 0)
-        {
-            DMOD_LOG_WARN("Failed to deinitialize mount context for mount point '%s'\n", mount_point);
-        }
-    }
-
-    const char* module_name = Dmod_GetName(mp_entry->fs_context);
-    if(module_name == NULL)
-    {
-        DMOD_LOG_ERROR("Cannot remove mount point '%s': Failed to get module name\n", mount_point);
-        return false;
-    }
-
-    Dmod_EndUsage(module_name);
-
-    Dmod_Free(mp_entry->mount_point);
-    Dmod_Free(mp_entry->fs_cache);
+    dmfsi_context_t mount_context = mp_entry->mount_context;
+    Dmod_Context_t* fs_context = mp_entry->fs_context;
+    char* path = mp_entry->mount_point;
+    fs_cache_t* cache = mp_entry->fs_cache;
     mp_entry->mount_point = NULL;
     mp_entry->mount_context = NULL;
     mp_entry->fs_cache = NULL;
     mp_entry->fs_context = NULL;
+    mp_entry->reserved = true;
+    unlock_mutex();
+
+    if(deinit_func != NULL && deinit_func(mount_context) != 0)
+    {
+        DMOD_LOG_WARN("Failed to deinitialize mount context for mount point '%s'\n", path);
+    }
+
+    const char* module_name = Dmod_GetName(fs_context);
+    if(module_name != NULL)
+    {
+        Dmod_EndUsage(module_name);
+    }
+    Dmod_Free(path);
+    Dmod_Free(cache);
+
+    if(lock_mutex())
+    {
+        mp_entry->reserved = false;
+        unlock_mutex();
+    }
     return true;
 }
 
@@ -1215,20 +1267,19 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _mount_fs, (const char* fs_name, co
         return false;
     }
 
+    /* Unlocked: the file system's init does I/O, see add_mount_point() */
+    mount_point_t* mp_entry = add_mount_point(mount_point, fs_context, config);
+    if(mp_entry == NULL)
+    {
+        DMOD_LOG_ERROR("Cannot mount file system '%s'\n", fs_name);
+        return false;
+    }
+
     if(!lock_mutex())
     {
         DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
         return false;
     }
-
-    mount_point_t* mp_entry = add_mount_point(mount_point, fs_context, config);
-    if(mp_entry == NULL)
-    {
-        DMOD_LOG_ERROR("Cannot mount file system '%s'\n", fs_name);
-        unlock_mutex();
-        return false;
-    }
-
     dmfsi_context_t mount_context = mp_entry->mount_context;
     unlock_mutex();
 
@@ -1266,20 +1317,13 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _unmount_fs, (const char* mount_poi
         return false;
     }
 
-    if(!lock_mutex())
-    {
-        DMOD_LOG_ERROR("Failed to lock DMVFS mutex\n");
-        return false;
-    }
-
+    /* Unlocked: the file system's deinit does I/O, see remove_mount_point() */
     if(!remove_mount_point(mount_point))
     {
         DMOD_LOG_ERROR("Cannot unmount file system at mount point '%s'\n", mount_point);
-        unlock_mutex();
         return false;
     }
 
-    unlock_mutex();
     DMOD_LOG_INFO("File system at mount point '%s' unmounted successfully\n", mount_point);
     return true;
 }
