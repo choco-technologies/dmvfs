@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 #include "dmod.h"
 #include "dmvfs.h"
 #include "dmlist.h"
@@ -371,6 +372,64 @@ bool test_file_unlink(void)
         return false;
     }
     
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
+//      Test: Mount reports (dmfsi's _mount_changed dif)
+//
+// -----------------------------------------
+/* testfs implements the dif and keeps the reports - see tests/testfs/testfs.c */
+#define TESTFS_IOCTL_GET_MOUNT_LOG  0x4D4C
+#define TESTFS_MOUNT_LOG_SIZE       512
+
+/* The reports testfs got since the last call ("+<mount point>\n" / "-<mount point>\n"); false if unreadable */
+static bool read_mount_log(char* log)
+{
+    void* fp = NULL;
+    log[0] = '\0';
+    if (dmvfs_fopen(&fp, "/mnt/mount_log_probe", DMFSI_O_CREAT | DMFSI_O_RDWR, 0, 0) != DMFSI_OK) {
+        return false;
+    }
+    bool ok = dmvfs_ioctl(fp, TESTFS_IOCTL_GET_MOUNT_LOG, log) == 0;
+    dmvfs_fclose(fp);
+    dmvfs_unlink("/mnt/mount_log_probe");
+    return ok;
+}
+
+bool test_mount_reports(void)
+{
+    TEST_START("Mount reports (_mount_changed dif)");
+
+    const char* fs_name = Dmod_GetName(fs_module_context);
+    char log[TESTFS_MOUNT_LOG_SIZE];
+    char path[64];
+
+    // The mount points there are, for a module enabled after they were mounted
+    if (dmvfs_get_mount_point(0, path, sizeof(path)) != 0 || strcmp(path, "/mnt") != 0 ||
+        dmvfs_get_mount_point(1, path, sizeof(path)) != -ENOENT ||
+        dmvfs_get_mount_point(0, path, 3) != -ERANGE) {
+        TEST_FAIL("dmvfs_get_mount_point() does not list the mount points");
+        return false;
+    }
+
+    // Reported after the mount and before the unmount
+    read_mount_log(log);
+    bool ok = dmvfs_mount_fs(fs_name, "/lst", NULL) && dmvfs_unmount_fs("/lst");
+    ok = ok && read_mount_log(log) && strcmp(log, "+/lst\n-/lst\n") == 0;
+    if (!ok) {
+        TEST_FAIL("Mount/unmount not reported as expected");
+        return false;
+    }
+
+    // A failed unmount (nothing mounted there) reports nothing
+    if (dmvfs_unmount_fs("/lst") || !read_mount_log(log) || log[0] != '\0') {
+        TEST_FAIL("Unmounting what is not mounted is reported");
+        return false;
+    }
+
     TEST_PASS();
     return true;
 }
@@ -850,6 +909,11 @@ void run_all_tests(void)
     
     // PWD tests (run in both modes)
     test_pwd_operations();
+
+    // Mount report tests (testfs keeps the reports, read through a file it creates - writable mode only)
+    if (!read_only_mode) {
+        test_mount_reports();
+    }
     
     // DMLIST library tests (run in both modes)
     test_dmlist_operations();

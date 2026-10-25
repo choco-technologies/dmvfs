@@ -3,6 +3,16 @@
 #include "dmod.h"
 #include "dmfsi.h"
 
+/*
+ * Mount reports - dmfsi's _mount_changed dif, called by dmvfs - for tests/main.c: "+<mount point>" for a
+ * mount, "-<mount point>" for an unmount, one per line. TESTFS_IOCTL_GET_MOUNT_LOG (on any file) copies them to
+ * arg (char[TESTFS_MOUNT_LOG_SIZE]) and clears them.
+ */
+#define TESTFS_IOCTL_GET_MOUNT_LOG  0x4D4C
+#define TESTFS_MOUNT_LOG_SIZE       512
+static char g_mount_log[TESTFS_MOUNT_LOG_SIZE];
+static size_t g_mount_log_len;
+
 // Lokalna implementacja funkcji string/mem
 void testfs_memset(void* ptr, int value, size_t num) {
     unsigned char* p = (unsigned char*)ptr;
@@ -297,7 +307,24 @@ dmod_dmfsi_dif_api_declaration( 2.0, testfs, dmfsi_size_t, _lseek, (dmfsi_contex
 
 dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _ioctl, (dmfsi_context_t ctx, void* fp, int request, void* arg) )
 {
+    if (request == TESTFS_IOCTL_GET_MOUNT_LOG && arg != NULL) {
+        testfs_memcpy(arg, g_mount_log, g_mount_log_len + 1);
+        g_mount_log_len = 0;
+        g_mount_log[0] = '\0';
+    }
     return 0;
+}
+
+dmod_dmfsi_dif_api_declaration( 1.0, testfs, void, _mount_changed, (const char* mount_point, bool mounted) )
+{
+    size_t len = 0;
+    while (mount_point[len]) ++len;
+    if (g_mount_log_len + len + 3 > sizeof(g_mount_log)) return;
+    g_mount_log[g_mount_log_len++] = mounted ? '+' : '-';
+    testfs_memcpy(&g_mount_log[g_mount_log_len], mount_point, len);
+    g_mount_log_len += len;
+    g_mount_log[g_mount_log_len++] = '\n';
+    g_mount_log[g_mount_log_len] = '\0';
 }
 
 dmod_dmfsi_dif_api_declaration( 1.0, testfs, int, _sync, (dmfsi_context_t ctx, void* fp) )

@@ -178,6 +178,33 @@ int main(void) {
 #### Mount Management
 - `dmvfs_mount_fs(fs_name, mount_point, config)` - Mount a file system
 - `dmvfs_unmount_fs(mount_point)` - Unmount a file system
+- `dmvfs_get_mount_point(index, buffer, size)` - The mount points there are, one by one
+
+A module that has to know about mounts implements dmfsi's `_mount_changed`
+dif (`dmfsi.h`):
+
+```c
+#include "dmfsi.h"
+
+dmod_dmfsi_dif_api_declaration( 1.0, mymodule, void, _mount_changed, (const char* mount_point, bool mounted) )
+{
+    ...
+}
+```
+
+dmvfs calls it in every enabled module implementing it, with `mounted == true`
+after a file system is mounted and with `mounted == false` before it is
+unmounted - while it can still be used, so whatever was started from it can
+stop first. There is nothing to register: a module that is disabled or unloaded
+is simply not called. Implementing a dif creates no dependency on dmvfs, so such
+a module still loads where there is no dmvfs (e.g. the host loader). A module
+enabled later reads the mounts there are with `dmvfs_get_mount_point()`.
+
+The calls are made without dmvfs's own mutex held, one at a time, in the thread
+that mounts or unmounts: an implementation may read files and mount or unmount
+itself, but must not wait for another thread that does, and should hand longer
+work to a thread of its own. A mount may be reported twice (an unmount that
+failed is reported as mounted again), so a repeated report is a no-op.
 
 #### File Operations
 - `dmvfs_fopen(fp, path, mode, attr, pid)` - Open a file
