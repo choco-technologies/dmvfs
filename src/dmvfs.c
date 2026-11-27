@@ -1779,8 +1779,11 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
      * same reasoning as _fclose(). Entries currently pinned by an in-flight
      * read/write (busy_count > 0) are skipped, same as a direct _fclose()
      * would refuse them. */
+    /* Every pass either removes one file of the process or moves "last" one file further along the list, and the
+     * list is finite - the loop ends when no file of the process is left after "last". */
     file_t* last = NULL;
-    for (;;)
+    file_t* file_entry = NULL;
+    do
     {
         if (!lock_mutex())
         {
@@ -1788,38 +1791,38 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
             return -1;
         }
 
-        file_t* file_entry = (last == NULL)
+        file_entry = (last == NULL)
             ? dmlist_find(g_open_files, &pid, file_compare_pid)
             : dmlist_find_next(g_open_files, last, &pid, file_compare_pid);
+
         if (file_entry == NULL)
         {
             unlock_mutex();
-            break;
         }
-
-        if (file_entry->busy_count > 0)
+        else if (file_entry->busy_count > 0)
         {
             DMOD_LOG_WARN("File for process ID %d is in use, skipping close\n", pid);
             unlock_mutex();
             success = false;
             last = file_entry;
-            continue;
         }
-
-        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(file_entry->mount_point, FS_OP_FCLOSE);
-        dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
-        void* fs_file = file_entry->fs_file;
-
-        file_destroy(file_entry);
-        unlock_mutex();
-        last = NULL;
-
-        if (fclose_func != NULL && fclose_func(mount_context, fs_file) != 0)
+        else
         {
-            DMOD_LOG_ERROR("Failed to close file for process ID %d\n", pid);
-            success = false;
+            dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(file_entry->mount_point, FS_OP_FCLOSE);
+            dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+            void* fs_file = file_entry->fs_file;
+
+            file_destroy(file_entry);
+            unlock_mutex();
+            last = NULL;
+
+            if (fclose_func != NULL && fclose_func(mount_context, fs_file) != 0)
+            {
+                DMOD_LOG_ERROR("Failed to close file for process ID %d\n", pid);
+                success = false;
+            }
         }
-    }
+    } while (file_entry != NULL);
 
     if (success)
     {
