@@ -67,6 +67,21 @@ set(DMOD_DIR ${dmod_SOURCE_DIR})
 FetchContent_MakeAvailable(dmfsi)
 
 # ======================================================================
+#               Fetch DMLIST (the list of the open files)
+# ======================================================================
+# Only the headers: dmlist is built into the system next to dmvfs, and
+# whoever links dmvfs into a binary links dmlist too (like dmod).
+if(NOT TARGET dmlist)
+    FetchContent_Declare(
+        dmlist
+        GIT_REPOSITORY https://github.com/choco-technologies/dmlist.git
+        GIT_TAG        master
+    )
+    set(DMLIST_BUILD_TESTS OFF CACHE BOOL "Build dmlist tests")
+    FetchContent_MakeAvailable(dmlist)
+endif()
+
+# ======================================================================
 #               DMOD VFS Interface Library
 # ======================================================================
 # Header-only target for code that just calls dmvfs's DMOD_BUILTIN_API
@@ -105,6 +120,7 @@ target_link_libraries(dmvfs PUBLIC
 )
 target_include_directories(dmvfs PUBLIC
     $<TARGET_PROPERTY:dmfsi,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:dmlist,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 if(DMVFS_BUILD_TESTS)

@@ -1,5 +1,7 @@
 #define ENABLE_DIF_REGISTRATIONS    ON
 #include "dmvfs.h"
+#include "dmlist.h"
+#include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
@@ -59,7 +61,13 @@ typedef struct {
     bool reserved;             /**< Being mounted or unmounted: not free, not visible yet/anymore (see add_mount_point) */
 } mount_point_t;
 
+/**
+ * @brief Value of file_t::magic while the handle is open (see file_is_valid)
+ */
+static const uint32_t FILE_MAGIC = 0x46494C45u;     /* 'FILE' */
+
 typedef struct {
+    uint32_t magic;            /**< FILE_MAGIC while open, cleared before the handle is freed - tells a stale handle from a live one */
     mount_point_t* mount_point;
     void* fs_file;
     int pid;
@@ -87,7 +95,7 @@ static void* g_listener_mutex = NULL;   /* Serializes the mount reports (dmfsi's
 static void* g_mount_mutex = NULL;  /* Serializes mounts and unmounts - see mount_lock() */
 static char* g_cwd = NULL;
 static char* g_pwd = NULL;
-static file_t* g_open_files = NULL;
+static dmlist_context_t* g_open_files = NULL;   /* Open files (file_t*), one allocation each, at most g_max_open_files */
 
 static const char* const* const g_fs_op_signatures[FS_OP_COUNT] = {
     [FS_OP_FOPEN]     = &dmod_dmfsi_fopen_sig,
@@ -830,10 +838,28 @@ static void get_basename(const char* path, char* buffer, size_t buffer_size)
 }
 
 /**
- * @brief Find free file entry
- * @return Pointer to free file entry, or NULL if none available
+ * @brief Check that a handle given by the caller is an open file
+ *
+ * A closed handle has its magic cleared before it is freed, so no search is needed to refuse it.
+ *
+ * @param file_entry Handle to check (may be NULL)
+ * @return true if it is open
  */
-static file_t* find_free_file_entry(void)
+static bool file_is_valid(const file_t* file_entry)
+{
+    return file_entry != NULL
+        && file_entry->magic == FILE_MAGIC
+        && file_entry->mount_point != NULL
+        && file_entry->fs_file != NULL;
+}
+
+/**
+ * @brief Create a file entry and add it to the list of the open files
+ * @note Must be called with g_mutex held.
+ *
+ * @return New entry, or NULL if the limit of the open files is reached or there is no memory
+ */
+static file_t* file_create(mount_point_t* mount_point, void* fs_file, int pid)
 {
     if(!is_initialized())
     {
@@ -841,16 +867,64 @@ static file_t* find_free_file_entry(void)
         return NULL;
     }
 
-    for(int i = 0; i < g_max_open_files; i++)
+    if(dmlist_size(g_open_files) >= (size_t)g_max_open_files)
     {
-        if(g_open_files[i].mount_point == NULL)
-        {
-            return &g_open_files[i];
-        }
+        DMOD_LOG_ERROR("No free file entries available\n");
+        return NULL;
     }
 
-    DMOD_LOG_ERROR("No free file entries available\n");
-    return NULL;
+    file_t* file_entry = Dmod_Malloc(sizeof(file_t));
+    if(file_entry == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate file entry\n");
+        return NULL;
+    }
+
+    file_entry->magic = FILE_MAGIC;
+    file_entry->mount_point = mount_point;
+    file_entry->fs_file = fs_file;
+    file_entry->pid = pid;
+    file_entry->busy_count = 0;
+
+    if(!dmlist_push_back(g_open_files, file_entry))
+    {
+        DMOD_LOG_ERROR("Failed to add file entry\n");
+        Dmod_Free(file_entry);
+        return NULL;
+    }
+
+    return file_entry;
+}
+
+static int file_compare_pointer(const void* element, const void* key)
+{
+    return (element == key) ? 0 : 1;
+}
+
+static int file_compare_mount_point(const void* element, const void* key)
+{
+    const file_t* file_entry = element;
+    return (file_entry->mount_point == key) ? 0 : 1;
+}
+
+static int file_compare_pid(const void* element, const void* key)
+{
+    const file_t* file_entry = element;
+    const int* pid = key;
+    return (file_entry->pid == *pid) ? 0 : 1;
+}
+
+/**
+ * @brief Take a file entry out of the list and free it
+ * @note Must be called with g_mutex held. The caller copies what it needs from the entry first.
+ */
+static void file_destroy(file_t* file_entry)
+{
+    dmlist_remove(g_open_files, file_entry, file_compare_pointer);
+    file_entry->magic = 0;
+    file_entry->mount_point = NULL;
+    file_entry->fs_file = NULL;
+    Dmod_Free(file_entry);
 }
 
 /**
@@ -866,23 +940,23 @@ static bool close_all_file_of_mount_point(mount_point_t* mp_entry)
         return false;
     }
 
-    for(int i = 0; i < g_max_open_files; i++)
+    file_t* file_entry = dmlist_find(g_open_files, mp_entry, file_compare_mount_point);
+    while(file_entry != NULL)
     {
-        if(g_open_files[i].mount_point == mp_entry)
-        {
-            dmod_dmfsi_fclose_t close_func = (dmod_dmfsi_fclose_t)get_fs_function(mp_entry, FS_OP_FCLOSE);
-            if(close_func != NULL)
-            {
-                if(close_func(mp_entry->mount_context, g_open_files[i].fs_file) != 0)
-                {
-                    DMOD_LOG_ERROR("Failed to close file in mount point '%s'\n", mp_entry->mount_point);
-                    return false;
-                }
-            }
+        file_t* next = dmlist_find_next(g_open_files, file_entry, mp_entry, file_compare_mount_point);
 
-            g_open_files[i].mount_point = NULL;
-            g_open_files[i].fs_file = NULL;
+        dmod_dmfsi_fclose_t close_func = (dmod_dmfsi_fclose_t)get_fs_function(mp_entry, FS_OP_FCLOSE);
+        if(close_func != NULL)
+        {
+            if(close_func(mp_entry->mount_context, file_entry->fs_file) != 0)
+            {
+                DMOD_LOG_ERROR("Failed to close file in mount point '%s'\n", mp_entry->mount_point);
+                return false;
+            }
         }
+
+        file_destroy(file_entry);
+        file_entry = next;
     }
 
     return true;
@@ -1147,17 +1221,16 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _init, (int max_mount_points, int m
         return false;
     }
 
-    g_open_files = (file_t*)Dmod_Malloc(sizeof(file_t) * max_open_files);
+    g_open_files = dmlist_create();
     if (g_open_files == NULL)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for open files\n");
+        DMOD_LOG_ERROR("Failed to create the list of open files\n");
         Dmod_Free(g_mount_points);
         g_mount_points = NULL;
         return false;
     }
 
     memset(g_mount_points, 0, sizeof(mount_point_t) * max_mount_points);
-    memset(g_open_files, 0, sizeof(file_t) * max_open_files);
     g_max_mount_points = max_mount_points;
     g_max_open_files = max_open_files;
 
@@ -1260,7 +1333,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, bool, _deinit, (void))
 
     // Free the mount points array
     Dmod_Free(g_mount_points);
-    Dmod_Free(g_open_files);
+    for (file_t* file_entry = dmlist_pop_front(g_open_files); file_entry != NULL; file_entry = dmlist_pop_front(g_open_files))
+    {
+        file_entry->magic = 0;
+        Dmod_Free(file_entry);
+    }
+    dmlist_destroy(g_open_files);
+    g_open_files = NULL;
+    g_max_open_files = 0;
     Dmod_Free(g_cwd);
     Dmod_Free(g_pwd);
     g_mount_points = NULL;
@@ -1583,19 +1663,14 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fopen, (void** fp, const char* path
         return -1;
     }
 
-    file_t* free_entry = find_free_file_entry();
-    if (free_entry == NULL)
+    file_t* file_entry = file_create(mp_entry, fs_file, pid);
+    if (file_entry == NULL)
     {
-        DMOD_LOG_ERROR("No free file entries available\n");
         unlock_mutex();
         return -1;
     }
 
-    free_entry->mount_point = mp_entry;
-    free_entry->fs_file = fs_file;
-    free_entry->pid = pid;
-    free_entry->busy_count = 0;
-    *fp = free_entry;
+    *fp = file_entry;
 
     unlock_mutex();
     DMOD_LOG_VERBOSE("File '%s' opened successfully\n", path);
@@ -1635,7 +1710,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
         return -1;
     }
 
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -1654,8 +1729,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
     if (fclose_func == NULL)
     {
         DMOD_LOG_ERROR("File system does not support fclose\n");
-        file_entry->mount_point = NULL;
-        file_entry->fs_file = NULL;
+        file_destroy(file_entry);
         unlock_mutex();
         return -1;
     }
@@ -1666,8 +1740,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose, (void* fp))
      * run while holding the global DMVFS mutex. */
     dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
     void* fs_file = file_entry->fs_file;
-    file_entry->mount_point = NULL;
-    file_entry->fs_file = NULL;
+    file_destroy(file_entry);
     unlock_mutex();
 
     if (fclose_func(mount_context, fs_file) != 0)
@@ -1706,7 +1779,8 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
      * same reasoning as _fclose(). Entries currently pinned by an in-flight
      * read/write (busy_count > 0) are skipped, same as a direct _fclose()
      * would refuse them. */
-    for (int i = 0; i < g_max_open_files; i++)
+    file_t* last = NULL;
+    for (;;)
     {
         if (!lock_mutex())
         {
@@ -1714,28 +1788,31 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fclose_process, (int pid))
             return -1;
         }
 
-        if (g_open_files[i].pid != pid || g_open_files[i].mount_point == NULL)
+        file_t* file_entry = (last == NULL)
+            ? dmlist_find(g_open_files, &pid, file_compare_pid)
+            : dmlist_find_next(g_open_files, last, &pid, file_compare_pid);
+        if (file_entry == NULL)
         {
             unlock_mutex();
-            continue;
+            break;
         }
 
-        if (g_open_files[i].busy_count > 0)
+        if (file_entry->busy_count > 0)
         {
             DMOD_LOG_WARN("File for process ID %d is in use, skipping close\n", pid);
             unlock_mutex();
             success = false;
+            last = file_entry;
             continue;
         }
 
-        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(g_open_files[i].mount_point, FS_OP_FCLOSE);
-        dmfsi_context_t mount_context = g_open_files[i].mount_point->mount_context;
-        void* fs_file = g_open_files[i].fs_file;
+        dmod_dmfsi_fclose_t fclose_func = (dmod_dmfsi_fclose_t)get_fs_function(file_entry->mount_point, FS_OP_FCLOSE);
+        dmfsi_context_t mount_context = file_entry->mount_point->mount_context;
+        void* fs_file = file_entry->fs_file;
 
-        g_open_files[i].mount_point = NULL;
-        g_open_files[i].fs_file = NULL;
-        g_open_files[i].pid = 0;
+        file_destroy(file_entry);
         unlock_mutex();
+        last = NULL;
 
         if (fclose_func != NULL && fclose_func(mount_context, fs_file) != 0)
         {
@@ -1792,7 +1869,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fread, (void* fp, void* buf, size_t
 
     file_t* file_entry = (file_t*)fp;
 
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -1875,7 +1952,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fwrite, (void* fp, const void* buf,
 
     file_t* file_entry = (file_t*)fp;
 
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -1952,7 +2029,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _lseek, (void* fp, dmfsi_
     }
 
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -2016,7 +2093,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 2.0, dmfsi_offset_t, _ftell, (void* fp))
     }
 
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -2074,7 +2151,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _feof, (void* fp))
     }
 
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -2128,7 +2205,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _fflush, (void* fp))
     }
 
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -2182,7 +2259,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _error, (void* fp))
     }
 
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         DMOD_LOG_ERROR("Invalid file entry\n");
         unlock_mutex();
@@ -2335,7 +2412,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _ioctl, (void* fp, int command, void
     }
     
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         unlock_mutex();
         return -1;
@@ -2376,7 +2453,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _sync, (void* fp))
     }
     
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         unlock_mutex();
         return -1;
@@ -2467,7 +2544,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _getc, (void* fp))
     }
     
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         unlock_mutex();
         return -1;
@@ -2511,7 +2588,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _putc, (void* fp, int c))
     }
     
     file_t* file_entry = (file_t*)fp;
-    if (file_entry->mount_point == NULL || file_entry->fs_file == NULL)
+    if (!file_is_valid(file_entry))
     {
         unlock_mutex();
         return -1;
@@ -3068,7 +3145,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
     }
 
     // Find a free file entry to track this directory handle
-    file_t* free_entry = find_free_file_entry();
+    file_t* free_entry = file_create(mp_entry, dir_wrapper, 0);
     if (free_entry == NULL) {
         DMOD_LOG_ERROR("No free file entries available for directory\n");
         unlock_mutex();
@@ -3081,10 +3158,6 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _opendir, (void** dp, const char* pa
         Dmod_Free(dir_wrapper);
         return -1;
     }
-    free_entry->mount_point = mp_entry;
-    free_entry->fs_file = dir_wrapper;
-    free_entry->pid = 0;
-    free_entry->busy_count = 0;
 
     *dp = free_entry;
     DMOD_LOG_VERBOSE("Directory '%s' opened successfully\n", path);
@@ -3117,7 +3190,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _readdir, (void* dp, dmfsi_dir_entry
 
     file_t* dir_entry = (file_t*)dp;
 
-    if (dir_entry->mount_point == NULL || dir_entry->fs_file == NULL)
+    if (!file_is_valid(dir_entry))
     {
         DMOD_LOG_ERROR("Invalid directory handle\n");
         unlock_mutex();
@@ -3222,7 +3295,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
 
     file_t* dir_entry = (file_t*)dp;
 
-    if (dir_entry->mount_point == NULL || dir_entry->fs_file == NULL)
+    if (!file_is_valid(dir_entry))
     {
         DMOD_LOG_ERROR("Invalid directory handle\n");
         unlock_mutex();
@@ -3250,8 +3323,7 @@ DMOD_INPUT_API_DECLARATION(dmvfs, 1.0, int, _closedir, (void* dp))
 
     // Clear the slot before releasing the lock, same reasoning as _fclose().
     dmfsi_context_t mount_context = dir_entry->mount_point->mount_context;
-    dir_entry->mount_point = NULL;
-    dir_entry->fs_file = NULL;
+    file_destroy(dir_entry);
     unlock_mutex();
 
     // Close the underlying filesystem directory

@@ -108,6 +108,42 @@ bool test_file_open_close(void)
 
 // -----------------------------------------
 //
+//      Test: Closed handle is refused (magic number)
+//
+// -----------------------------------------
+bool test_closed_handle(void)
+{
+    TEST_START("Closed handle is refused");
+    void* fp = NULL;
+    int ret = dmvfs_fopen(&fp, "/mnt/test.txt", DMFSI_O_CREAT | DMFSI_O_RDWR, 0, 0);
+    if (ret != DMFSI_OK || fp == NULL) {
+        TEST_FAIL("Cannot open file");
+        return false;
+    }
+
+    if (dmvfs_fclose(fp) != 0) {
+        TEST_FAIL("Cannot close file");
+        return false;
+    }
+
+    /* The handle is stale now: every operation has to refuse it, a second close included */
+    char byte = 0;
+    size_t done = 0;
+    if (dmvfs_fread(fp, &byte, 1, &done) == 0) {
+        TEST_FAIL("Read from a closed handle succeeded");
+        return false;
+    }
+    if (dmvfs_fclose(fp) == 0) {
+        TEST_FAIL("Second close succeeded");
+        return false;
+    }
+
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
 //      Test: File write operations
 //
 // -----------------------------------------
@@ -893,6 +929,7 @@ void run_all_tests(void)
     } else {
         // Full test suite for writable filesystems
         test_file_open_close();
+        test_closed_handle();
         test_file_write();
         test_file_read();
         test_file_seek_tell();
