@@ -42,6 +42,6 @@ target_link_options(${PROJECT_NAME} PRIVATE -T ${CMAKE_CURRENT_SOURCE_DIR}/main.
 # Add mount point selection test
 add_executable(mount_point_test test_mount_point_selection.c)
 dmod_set_current_allocator(mount_point_test)
-target_link_libraries(mount_point_test dmod dmvfs)
+target_link_libraries(mount_point_test dmod dmvfs dmlist)
 target_link_options(mount_point_test PRIVATE -L ${DMOD_DIR}/scripts)
 target_link_options(mount_point_test PRIVATE -T ${CMAKE_CURRENT_SOURCE_DIR}/main.ld)

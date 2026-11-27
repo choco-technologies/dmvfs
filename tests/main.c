@@ -108,6 +108,82 @@ bool test_file_open_close(void)
 
 // -----------------------------------------
 //
+//      Test: Closed handle is refused (magic number)
+//
+// -----------------------------------------
+bool test_closed_handle(void)
+{
+    TEST_START("Closed handle is refused");
+    void* fp = NULL;
+    int ret = dmvfs_fopen(&fp, "/mnt/test.txt", DMFSI_O_CREAT | DMFSI_O_RDWR, 0, 0);
+    if (ret != DMFSI_OK || fp == NULL) {
+        TEST_FAIL("Cannot open file");
+        return false;
+    }
+
+    if (dmvfs_fclose(fp) != 0) {
+        TEST_FAIL("Cannot close file");
+        return false;
+    }
+
+    /* The handle is stale now: every operation has to refuse it, a second close included */
+    char byte = 0;
+    size_t done = 0;
+    if (dmvfs_fread(fp, &byte, 1, &done) == 0) {
+        TEST_FAIL("Read from a closed handle succeeded");
+        return false;
+    }
+    if (dmvfs_fclose(fp) == 0) {
+        TEST_FAIL("Second close succeeded");
+        return false;
+    }
+
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
+//      Test: Closing all files of a process
+//
+// -----------------------------------------
+bool test_close_process_files(void)
+{
+    TEST_START("Close all files of a process");
+    void* mine1 = NULL;
+    void* mine2 = NULL;
+    void* other = NULL;
+    int flags = DMFSI_O_CREAT | DMFSI_O_RDWR;
+    if (dmvfs_fopen(&mine1, "/mnt/test.txt", flags, 0, 77) != DMFSI_OK ||
+        dmvfs_fopen(&other, "/mnt/test.txt", flags, 0, 78) != DMFSI_OK ||
+        dmvfs_fopen(&mine2, "/mnt/test.txt", flags, 0, 77) != DMFSI_OK) {
+        TEST_FAIL("Cannot open files");
+        return false;
+    }
+
+    if (dmvfs_fclose_process(77) != 0) {
+        TEST_FAIL("fclose_process failed");
+        return false;
+    }
+
+    /* Both files of pid 77 are closed (their handles are refused now), the file of pid 78 is still open */
+    size_t done = 0;
+    char byte = 0;
+    if (dmvfs_fread(mine1, &byte, 1, &done) == 0 || dmvfs_fread(mine2, &byte, 1, &done) == 0) {
+        TEST_FAIL("A file of the process is still open");
+        return false;
+    }
+    if (dmvfs_fclose(other) != 0) {
+        TEST_FAIL("The file of another process was closed too");
+        return false;
+    }
+
+    TEST_PASS();
+    return true;
+}
+
+// -----------------------------------------
+//
 //      Test: File write operations
 //
 // -----------------------------------------
@@ -893,6 +969,8 @@ void run_all_tests(void)
     } else {
         // Full test suite for writable filesystems
         test_file_open_close();
+        test_closed_handle();
+        test_close_process_files();
         test_file_write();
         test_file_read();
         test_file_seek_tell();
